@@ -1,265 +1,327 @@
 # Planet CharLu — SpacePort Bazaar Client
 
-Planet CharLu is a client for the
-SpacePort Bazaar protocol. The client connects to the course-provided local
-validation server over WebSockets, exchanges binary Protocol Buffer messages,
-tracks marketplace state, and completes a required ten-step trading exercise as
+Planet CharLu builds a Python client for the
+SpacePort Bazaar protocol. The client connects to the course-provided validator over WebSockets, exchanges binary Protocol Buffer messages,
+tracks marketplace state, and completes the required ten-step trading exercise as
 player **P01** while the validator controls **P02**.
 
-The immediate goal is a small, reliable command-line client.
+The project is a command-line client. 
 
 ## Technology choices
 
-- **Language:** Python 3.12
-- **Concurrency:** Python `asyncio`
-- **WebSocket client:** `websockets`
-- **Serialization:** Google Protocol Buffers (`protobuf` and `grpcio-tools`)
-- **Tests:** `pytest` and `pytest-asyncio`
-- **Recommended environment:** Docker or a VS Code dev container on macOS or
-  Windows, because the supplied validator is a Linux executable
+- Python 3.11
+- `asyncio` and `websockets`
+- Protocol Buffers with `protobuf` and `grpcio-tools`
+- `pytest` and `pytest-asyncio`
+- Docker Compose for a consistent Linux development environment
+
+`grpcio-tools` is used only to generate Python classes from `bazaar.proto`; the
+client communicates over WebSockets, not gRPC.
 
 ## Current status
 
-- [x] Empty GitHub repository created and collaborator added
-- [ ] Repository scaffolded
-- [ ] Python environment and dependencies added
-- [ ] Protobuf schema added
-- [ ] Protocol classes generated
-- [ ] Validator binary configured
+- [x] GitHub repository created and collaborator added
+- [x] Repository structure created
+- [x] Python dependencies configured
+- [x] Protobuf schema added
+- [x] Protocol classes generated and imported successfully
+- [x] Protobuf smoke tests passing
+- [x] Docker development environment configured and verified
+- [x] Validator binary selected and started successfully in Docker
+- [x] Python client entry point runs
 - [ ] WebSocket connection implemented
 - [ ] Authentication implemented
 - [ ] Continuous receive loop implemented
+- [ ] Server messages decoded and state tracked
 - [ ] Ten-step validation exercise completed
-- [ ] Validation report reviewed and submitted as required
+- [ ] Final validation report reviewed
 
 Update this list as work is merged into `main`. Do not mark an item complete
 until it works from a fresh clone using the instructions below.
 
-## Planned repository layout
+## Repository layout
 
 ```text
 planet_charlu/
 ├── README.md
-├── .gitignore
 ├── requirements.txt
+├── Dockerfile
+├── compose.yaml
+├── .dockerignore
+├── .gitignore
 ├── protos/
 │   └── bazaar.proto
+├── scripts/
+│   ├── generate_proto.sh
+│   ├── verify_proto.sh
+│   └── run_validator.sh
 ├── src/
 │   └── planet_charlu/
 │       ├── __init__.py
 │       ├── main.py
-│       ├── connection.py
-│       ├── messages.py
 │       └── generated/
-│           └── __init__.py
+│           ├── __init__.py
+│           └── bazaar_pb2.py
 ├── tests/
-├── scripts/
-│   ├── generate_proto.sh
-│   └── run_validator.sh
-├── validator/
-│   └── README.md
-└── validation-credentials.example.json
+│   └── test_proto.py
+└── validator/
+    ├── spaceport-validate-linux-arm64
+    └── spaceport-validate-linux-x86_64
 ```
 
-Generated files, module names, and commands may need small adjustments after we
-inspect the package declarations in `bazaar.proto`.
+## Where should I run commands?
 
-## Prerequisites
+There are only two environments you need to distinguish in the recommended
+workflow:
 
-Ensure the following tools are installed:
+| Environment | How to recognize it | Use it for |
+|---|---|---|
+| Host terminal | Normal macOS, Windows, or Linux terminal | Git, editing files, and starting or stopping Docker |
+| Container terminal | Opened with `docker compose exec app bash`; the prompt may begin with `root@...:/workspace#` | Python, Protobuf generation, tests, validator, and client |
 
-- Git
-- Python 3.12
-- Docker Desktop or another Docker-compatible runtime if the host is not Linux
-- The course-provided `bazaar.proto`
-- One course-provided validator binary:
-  - `spaceport-validate-linux-arm64`
-  - `spaceport-validate-linux-x86_64`
+The **Docker container** is the Linux environment. A **Docker terminal** is
+simply a shell opened inside that running container; they are not separate
+environments.
 
-The validator requires Linux with glibc 2.34 or newer and `libgcc_s.so.1`.
-Running both the client and validator inside the same Linux container avoids
-host-platform and networking differences.
+A local `.venv` is optional. It is useful when running Python directly on the
+host without Docker, but it is not required for the recommended Docker workflow.
+Do not activate `.venv` inside the container—Docker already has its own isolated
+Python installation.
 
-## Clone and create the Python environment
+In short:
+
+- Run `git ...` and `docker compose ...` in the host terminal.
+- Run `python ...`, `pytest`, and `./scripts/...` in the container terminal.
+- Use `.venv` only when intentionally running Python outside Docker.
+
+## First-time setup
+
+### 1. Clone the repository on the host
 
 ```bash
 git clone https://github.com/lucykgood/planet_charlu.git
 cd planet_charlu
-
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
 ```
 
-On Windows PowerShell outside a container, activate the environment with:
+### 2. Build and start the development container
 
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-The initial `requirements.txt` should contain version-pinned releases of:
-
-```text
-websockets
-protobuf
-grpcio-tools
-pytest
-pytest-asyncio
-```
-
-Pin exact versions once the first working environment is confirmed so both
-partners and the grader use consistent dependencies.
-
-## Add and generate the Protobuf code
-
-Place the supplied schema at `protos/bazaar.proto`. Do not rewrite the schema
-unless the assignment explicitly instructs us to do so.
-
-From the repository root, generate Python classes with:
+Make sure Docker Desktop is running, then use the host terminal:
 
 ```bash
-python -m grpc_tools.protoc \
-  -I protos \
-  --python_out=src/planet_charlu/generated \
-  protos/bazaar.proto
+docker compose up --detach --build
+docker compose ps
 ```
 
-The planned `scripts/generate_proto.sh` should wrap this command so regeneration
-is consistent. After generating, confirm the module imports successfully:
+The `app` service should show as running.
+
+### 3. Enter the container
 
 ```bash
-PYTHONPATH=src python -c "from planet_charlu.generated import bazaar_pb2"
+docker compose exec app bash
 ```
 
-We plan to commit the generated Python module unless the course instructions
-prohibit it. Committing it lets a partner run the client immediately while the
-generation script keeps the output reproducible.
+The repository is mounted at `/workspace`, so edits made on the host are
+immediately visible in the container.
 
-## Select the validator binary
-
-The validator is supplied in two Linux builds. Inside the Linux environment
-where it will run, check the architecture:
+### 4. Verify the setup inside the container
 
 ```bash
-uname -m
+python --version
+./scripts/verify_proto.sh
+python -m pytest -v
+python -m planet_charlu.main
 ```
 
-Use the matching binary:
+Expected results:
 
-| `uname -m` result | Validator |
-|---|---|
-| `x86_64` or `amd64` | `spaceport-validate-linux-x86_64` |
-| `aarch64` or `arm64` | `spaceport-validate-linux-arm64` |
+- Python reports version 3.11.
+- Protobuf generation and import succeed.
+- Tests pass.
+- The client entry point runs without an import error.
 
-Place the matching file in `validator/` and make it executable:
+If these commands pass, first-time setup is complete.
+
+## Returning to the project
+
+Use this sequence each time you return.
+
+### Host terminal
 
 ```bash
-chmod +x validator/spaceport-validate-linux-x86_64
+cd /path/to/planet_charlu
+git switch main
+git pull --ff-only
+docker compose up --detach
+docker compose ps
 ```
 
-Substitute the ARM64 filename when appropriate. Whether the binaries themselves
-belong in Git must be confirmed against course redistribution rules and GitHub's
-file-size limits. If they are not committed, `validator/README.md` must tell each
-partner where to obtain them.
-
-## Local credentials
-
-Copy the committed example file:
+If `requirements.txt`, `Dockerfile`, or `compose.yaml` changed after pulling,
+rebuild instead:
 
 ```bash
-cp validation-credentials.example.json validation-credentials.json
+docker compose up --detach --build
 ```
 
-Then add the P01 token supplied by the validator or course materials. Never
-commit the real token. These entries must be present in `.gitignore`:
+Create a branch for new work:
 
-```gitignore
-.venv/
-__pycache__/
-.pytest_cache/
-*.py[cod]
-.env
-validation-credentials.json
-validation-report.json
+```bash
+git switch -c feature/short-description
 ```
 
-## Start the validator
+Then enter the container:
 
-The final wrapper command will be:
+```bash
+docker compose exec app bash
+```
+
+### Container terminal
+
+Before coding, run:
+
+```bash
+./scripts/verify_proto.sh
+python -m pytest -v
+```
+
+When finished, type `exit` to leave the container shell. The container continues
+running in the background until you stop it from the host:
+
+```bash
+docker compose down
+```
+
+`docker compose down` does not delete the repository or source code.
+
+## Protobuf generation
+
+The source schema is `protos/bazaar.proto`. Generate `bazaar_pb2.py` inside the
+container with:
+
+```bash
+./scripts/generate_proto.sh
+```
+
+Verify generation and import together with:
+
+```bash
+./scripts/verify_proto.sh
+```
+
+Do not manually edit `src/planet_charlu/generated/bazaar_pb2.py`; regenerate it
+from the schema. Do not add `--grpc_python_out` because this project does not use
+gRPC networking.
+
+When `bazaar.proto` changes, regenerate and run the tests before committing:
+
+```bash
+./scripts/generate_proto.sh
+python -m pytest -v
+git diff -- src/planet_charlu/generated
+```
+
+## Run the validator and client
+
+The validator and client should run in two shells inside the same container so
+the client can use `ws://127.0.0.1:3001/ws`.
+
+### Terminal 1: validator
+
+From the host:
+
+```bash
+docker compose exec app bash
+```
+
+Then, inside the container:
 
 ```bash
 ./scripts/run_validator.sh
 ```
 
-Until that script exists, run the matching binary directly from the repository
-root. The validator must use the Protobuf codec:
+The validator does not support a standalone `--help` flag. The wrapper selects
+the ARM64 or x86-64 binary and supplies `--codec protobuf` automatically. Leave
+this terminal running.
+
+### Terminal 2: client
+
+Open another host terminal:
 
 ```bash
-./validator/spaceport-validate-linux-x86_64 --codec protobuf
+cd /path/to/planet_charlu
+docker compose exec app bash
 ```
 
-The expected client endpoint is:
-
-```text
-ws://127.0.0.1:3001/ws
-```
-
-The validator may support flags for the address, credentials filename, or report
-filename. Check its `--help` output before encoding those options in the wrapper:
+Then run inside the container:
 
 ```bash
-./validator/spaceport-validate-linux-x86_64 --help
+python -m planet_charlu.main
 ```
 
-Keep this terminal running while using the client.
+Stop the validator with `Ctrl+C`. Use `exit` to leave either container shell.
 
-## Run the client
-
-In a second terminal, activate the same Python environment and run:
-
-```bash
-source .venv/bin/activate
-PYTHONPATH=src python -m planet_charlu.main
-```
-
-The client will eventually:
-
-1. Read P01 credentials from local configuration.
-2. Connect to `ws://127.0.0.1:3001/ws` with the required headers and WebSocket
-   subprotocol.
-3. Send and receive binary Protobuf frames.
-4. Run a continuous receive loop for asynchronous server messages.
-5. Track `run_id`, `request_id`, object IDs, snapshot sequence, world version,
-   tick, and expiration tick values.
-6. Execute the required ten-step validation exercise.
-
-The exact authentication header and subprotocol values must come from the
-course schema, README, or validator output; do not guess them or hard-code a
-secret in source control.
+The validator may create `validation-credentials.json` and
+`validation-report.json`. Both are local files ignored by Git. Never commit
+tokens, credentials, or private validation output.
 
 ## Run tests
 
-Run the complete test suite from the repository root:
+Inside the container:
 
 ```bash
-PYTHONPATH=src pytest -v
+python -m pytest -v
 ```
 
-The first smoke tests should verify that:
+Run a particular test file with:
 
-- generated Protobuf classes import correctly;
-- representative messages serialize and deserialize;
-- configuration loads without logging the token;
-- request IDs are correlated with responses;
-- retry logic reuses the exact request ID only when retrying the same request;
-- the receive loop can process unsolicited server messages.
+```bash
+python -m pytest tests/test_proto.py -v
+```
+
+Tests should eventually cover:
+
+- Protobuf generation, imports, serialization, and deserialization
+- Configuration loading without printing the token
+- WebSocket connection and authentication behavior
+- Request and response correlation
+- Retry behavior and request ID reuse
+- Processing of unsolicited server messages
+- Local state updates and the validation sequence
+
+## Optional: local virtual environment
+
+Use this only if you want to run Python directly on the host instead of Docker.
+Docker remains required for the Linux validator.
+
+Create the environment once:
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+On later sessions, reactivate it with:
+
+```bash
+source .venv/bin/activate
+```
+
+Leave it with:
+
+```bash
+deactivate
+```
+
+Changing directories does not deactivate a virtual environment. The `.venv`
+directory is ignored by Git and will not appear when another contributor clones
+the repository.
 
 ## Required validation scenario
 
-The completed client must perform the validator's ten-step scenario:
+The completed client must:
 
-1. Receive the initial state and readiness messages.
+1. Receive initial state and readiness messages.
 2. Advertise water in exchange for food.
 3. Replace that advertisement with one seeking components.
 4. Offer two water for one food.
@@ -271,69 +333,45 @@ The completed client must perform the validator's ten-step scenario:
    expected protocol error.
 10. Synchronize and verify final state.
 
-The expected final P01 inventory is **28 water, 31 food, and 31 components**.
-The validation report is expected to indicate **8 messages sent**, **16 messages
-received**, status `sample exchange completed`, and completion through step 10.
-Treat those numbers as validation targets, not values to hard-code into the
-client's behavior.
+Expected final P01 inventory: **28 water, 31 food, and 31 components**.
 
-## Recommended next task
+Expected report targets: **8 messages sent**, **16 messages received**, status
+`sample exchange completed`, and completion through step 10. These are
+validation targets, not values to hard-code into the client.
 
-The next contributor should implement the initial connection and receive path on
-a feature branch:
+## Next task
+
+Implement the initial connection and receive path on a feature branch:
 
 ```bash
 git switch -c feature/websocket-connection
 ```
 
-Suggested scope:
+The task should:
 
-1. Confirm generated Protobuf types and the required authentication fields.
-2. Load the P01 token from `validation-credentials.json` or an environment
-   variable without printing it.
-3. Connect to the local validator endpoint with the required headers and
-   subprotocol.
-4. Keep an asynchronous receive loop running.
-5. Decode and log the message type and safe identifiers from initial
-   state/readiness messages.
-6. Add unit tests for configuration and message decoding.
-7. Update **Current status**, push the branch, and open a pull request.
+1. Load the P01 token without printing or committing it.
+2. Connect to `ws://127.0.0.1:3001/ws` with the required headers and
+   subprotocol from the supplied protocol documentation.
+3. Send and receive binary Protobuf frames.
+4. Maintain a continuous asynchronous receive loop.
+5. Decode and safely log initial state and readiness messages.
+6. Add tests for configuration and message decoding.
 
-Do not begin by implementing all ten trading steps in `main.py`. Keep connection,
-message encoding/decoding, state tracking, and scenario orchestration separate so
-both partners can work without repeatedly editing the same file.
+Keep connection management, message encoding/decoding, state tracking, and
+scenario orchestration in separate modules rather than implementing everything
+inside `main.py`.
 
 ## Git workflow
 
-Start each task from an updated `main` branch:
+Run Git commands from the host terminal. At the end of a task:
 
 ```bash
-git switch main
-git pull --ff-only
-git switch -c feature/short-description
-```
-
-Commit focused changes, push the branch, and open a pull request:
-
-```bash
+git status
 git add <files>
-git commit -m "Implement short description"
-git push -u origin feature/short-description
+git commit -m "Describe the completed change"
+git push -u origin HEAD
 ```
 
-Do not commit credentials, tokens, validation reports, virtual environments, or
-editor-specific files.
-
-## Open questions
-
-Resolve these before implementation is considered stable:
-
-- Are validator binaries permitted in the shared GitHub repository?
-- Will both partners use the same Docker/dev-container environment?
-- What exact authentication header and WebSocket subprotocol does the schema or
-  validator require?
-- Are generated Protobuf Python files expected to be committed?
-- What files must be included in the final course submission?
-- Does the instructor require a particular Python version, dependency format, or
-  test command?
+Open a pull request into `main`. Do not commit `.venv`, credentials, tokens,
+reports, caches, or editor-specific files.
 
