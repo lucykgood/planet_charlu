@@ -1,0 +1,5 @@
+websockets
+protobuf
+grpcio-tools
+pytest
+pytest-asyncio

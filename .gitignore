@@ -1,0 +1,17 @@
+# Python virtual environment
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+
+# Local configuration and validator output
+.env
+validation-credentials.json
+validation-report.json
