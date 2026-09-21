@@ -1,14 +1,12 @@
-# Planet Charlu — Spaceport Bazaar Client
+# Planet CharLu — SpacePort Bazaar Client
 
-Planet Charlu is a two-person AI Engineering project to build a client for the
-Spaceport Bazaar protocol. The client connects to the course-provided local
+Planet CharLu is a client for the
+SpacePort Bazaar protocol. The client connects to the course-provided local
 validation server over WebSockets, exchanges binary Protocol Buffer messages,
 tracks marketplace state, and completes a required ten-step trading exercise as
 player **P01** while the validator controls **P02**.
 
-The immediate goal is a small, reliable command-line client—not a website or
-hosted service. Everything in the proposed stack is free and open source, and
-the validator runs locally. No paid cloud account is required.
+The immediate goal is a small, reliable command-line client.
 
 ## Technology choices
 
@@ -19,11 +17,6 @@ the validator runs locally. No paid cloud account is required.
 - **Tests:** `pytest` and `pytest-asyncio`
 - **Recommended environment:** Docker or a VS Code dev container on macOS or
   Windows, because the supplied validator is a Linux executable
-
-FastAPI, React, AWS, Firebase, and PostgreSQL are not needed for the core
-assignment. The client initiates a WebSocket connection to an existing server;
-it does not need to host an HTTP API, render a browser interface, or persist data
-in a database.
 
 ## Current status
 
@@ -73,7 +66,7 @@ inspect the package declarations in `bazaar.proto`.
 
 ## Prerequisites
 
-Install the following free tools:
+Ensure the following tools are installed:
 
 - Git
 - Python 3.12
@@ -90,7 +83,7 @@ host-platform and networking differences.
 ## Clone and create the Python environment
 
 ```bash
-git clone <PLANET_CHARLU_REPOSITORY_URL>
+git clone https://github.com/lucykgood/planet_charlu.git
 cd planet_charlu
 
 python3.12 -m venv .venv
