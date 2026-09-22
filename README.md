@@ -29,10 +29,11 @@ client communicates over WebSockets, not gRPC.
 - [x] Docker development environment configured and verified
 - [x] Validator binary selected and started successfully in Docker
 - [x] Python client entry point runs
-- [ ] WebSocket connection implemented
-- [ ] Authentication implemented
-- [ ] Continuous receive loop implemented
-- [ ] Server messages decoded and state tracked
+- [x] WebSocket connection implemented
+- [x] Authentication implemented
+- [x] Continuous receive loop implemented
+- [x] Initial state and readiness messages decoded and safely logged
+- [ ] Domain model (offers, advertisements, transactions, commitments)
 - [ ] Ten-step validation exercise completed
 - [ ] Final validation report reviewed
 
@@ -58,12 +59,24 @@ planet_charlu/
 ├── src/
 │   └── planet_charlu/
 │       ├── __init__.py
+│       ├── config.py
+│       ├── codec.py
+│       ├── connection.py
+│       ├── session.py
+│       ├── logging_utils.py
 │       ├── main.py
 │       └── generated/
 │           ├── __init__.py
 │           └── bazaar_pb2.py
 ├── tests/
-│   └── test_proto.py
+│   ├── fixtures.py
+│   ├── test_config.py
+│   ├── test_codec.py
+│   ├── test_connection.py
+│   ├── test_logging_utils.py
+│   ├── test_main.py
+│   ├── test_proto.py
+│   └── test_session.py
 └── validator/
     ├── spaceport-validate-linux-arm64
     └── spaceport-validate-linux-x86_64
@@ -219,6 +232,53 @@ python -m pytest -v
 git diff -- src/planet_charlu/generated
 ```
 
+## Client architecture
+
+Each module owns one responsibility, so state tracking and decision logic
+never depend on network calls, and each layer can be tested without a live
+socket:
+
+| Module | Owns |
+| --- | --- |
+| `config.py` | Resolving the endpoint, station ID, and token from CLI flags, environment variables, or `validation-credentials.json`. Redacts the token from `repr`/`str`. |
+| `codec.py` | Binary Protobuf encode/decode and building `ClientMessage` payloads (`ready`, `sync`). |
+| `connection.py` | The WebSocket lifecycle: connecting with the `Authorization` header and `bazaar.protobuf.v2` subprotocol, verifying the server selected it, sending, and a `messages()` async generator that decodes each binary frame as a `ServerMessage`. |
+| `session.py` | Scenario orchestration: the required connect → read state → send ready → await readiness sequence (`perform_readiness_handshake`), then a continuous receive loop (`run`). |
+| `logging_utils.py` | Turning a decoded `ServerMessage` into a one-line, safe-to-log summary (never touches the token, which lives only in the connection header). |
+| `main.py` | Wiring: load config, run the session, translate `ConfigError`/`KeyboardInterrupt` into a clean exit. |
+
+This slice implements the required connection sequence through readiness
+(steps 1-4 of the brief's five-step sequence) and a continuous receive loop
+that logs every subsequent message. It intentionally does not yet send
+trading commands (`advertise`/`offer`/`accept`/`withdraw`) or track offers,
+advertisements, and transactions as domain objects — that is the next branch,
+building on `BazaarConnection.messages()` and `session.run()` as the
+foundation.
+
+## Configuration
+
+No source edit is needed to point the client at a different server or
+station. Every setting can be set by CLI flag or environment variable (CLI
+flags win):
+
+| Setting | CLI flag | Environment variable | Default |
+| --- | --- | --- | --- |
+| WebSocket endpoint | `--ws-url` | `BAZAAR_WS_URL` | `ws://127.0.0.1:3001/ws` |
+| Bearer token | `--token` | `BAZAAR_TOKEN` | *(none; falls back to the credentials file)* |
+| Credentials file | `--credentials-file` | `BAZAAR_CREDENTIALS_FILE` | `validation-credentials.json` |
+| Station ID | `--station-id` | `BAZAAR_STATION_ID` | `P01` |
+
+If `--token`/`BAZAAR_TOKEN` is not given, the client reads the token for
+`--station-id` out of the credentials file's `players` list — the same file
+the validator writes. The token is never printed: `ClientConfig.__repr__`
+always shows `token='***redacted***'`.
+
+Example: pointing at a different port without touching any source file:
+
+```bash
+python -m planet_charlu.main --ws-url ws://127.0.0.1:3002/ws --token "$BAZAAR_TOKEN"
+```
+
 ## Run the validator and client
 
 The validator and client should run in two shells inside the same container so
@@ -257,6 +317,23 @@ Then run inside the container:
 python -m planet_charlu.main
 ```
 
+Expect log lines like this, confirming the connection, the initial state, and
+the readiness handshake:
+
+```text
+INFO __main__: starting Planet CharLu client: ClientConfig(ws_url='ws://127.0.0.1:3001/ws', station_id='P01', token='***redacted***')
+INFO planet_charlu.connection: connected to ws://127.0.0.1:3001/ws (subprotocol=bazaar.protobuf.v2)
+INFO planet_charlu.session: initial state seq=1 world_version=2 tick=0 phase=PHASE_RUNNING self=P01 health=100
+INFO planet_charlu.session: received readiness run_id=<run id> ready=True seq=1
+INFO planet_charlu.session: readiness confirmed for run_id=<run id>; entering continuous receive loop
+```
+
+Cross-check `validation-report.json` in the validator's working directory:
+it should independently show `"last_completed_step": 1` and a matched
+`ready`/`readiness` exchange. The report proves the server's view of what
+was sent; the log lines above prove the client decoded and understood it —
+neither one alone is sufficient evidence.
+
 Stop the validator with `Ctrl+C`. Use `exit` to leave either container shell.
 
 The validator may create `validation-credentials.json` and
@@ -277,15 +354,41 @@ Run a particular test file with:
 python -m pytest tests/test_proto.py -v
 ```
 
-Tests should eventually cover:
+Measure coverage on handwritten code with:
 
-- Protobuf generation, imports, serialization, and deserialization
-- Configuration loading without printing the token
-- WebSocket connection and authentication behavior
-- Request and response correlation
-- Retry behavior and request ID reuse
-- Processing of unsolicited server messages
-- Local state updates and the validation sequence
+```bash
+python -m pytest --cov=planet_charlu --cov-report=term-missing
+```
+
+`.coveragerc` excludes `src/planet_charlu/generated/` from the report: it is
+machine-generated by `protoc` from `bazaar.proto`, not handwritten, and a
+coverage percentage there would say nothing about the client's correctness.
+`tests/test_proto.py` still smoke-tests that the generated bindings import
+and expose message classes.
+
+Covered so far, module by module:
+
+- `config.py`: CLI/env/default precedence, reading a token from a credentials
+  file, missing/malformed/empty-token failure paths, and token redaction.
+- `codec.py`: encode/decode round trips, that `false`/`0` survive (proto2
+  required fields, unlike proto3 optional fields, always serialize even
+  falsy values), and that malformed bytes raise `DecodeError`.
+- `connection.py`: the `Authorization` header and subprotocol are sent and
+  verified against a real local WebSocket server (`websockets.serve`, no
+  validator binary needed), a subprotocol mismatch raises before any data is
+  exchanged, binary frames round-trip, an unexpected text frame is rejected,
+  and calling `send`/`messages` before `connect` fails clearly.
+- `session.py`: the readiness handshake in isolation (wrong first message,
+  wrong second message, mismatched `run_id`) and the full `run()` loop
+  end-to-end against a fake server.
+- `logging_utils.py`: one summary per message kind, including the unset case.
+- `main.py`: the `ConfigError` → exit-1 path, the happy path wiring
+  `load_config` into `session.run`, and swallowing `KeyboardInterrupt`.
+
+Not yet covered, because the underlying feature does not exist yet: request
+ID correlation/retries, offer/advertisement/transaction domain objects, and
+the full ten-step validation sequence. Those land with the domain-model and
+decision-policy branches.
 
 ## Optional: local virtual environment
 
@@ -341,21 +444,29 @@ validation targets, not values to hard-code into the client.
 
 ## Next task
 
-Implement the initial connection and receive path on a feature branch:
+`feature/websocket-connection` implemented and validated the connection,
+authentication, codec, and readiness handshake described above (see
+[Client architecture](#client-architecture)); step 1 of the required
+validation scenario passes against the real validator binary.
 
-```bash
-git switch -c feature/websocket-connection
-```
+The next feature branch should build the domain model and drive steps 2-10:
 
-The task should:
-
-1. Load the P01 token without printing or committing it.
-2. Connect to `ws://127.0.0.1:3001/ws` with the required headers and
-   subprotocol from the supplied protocol documentation.
-3. Send and receive binary Protobuf frames.
-4. Maintain a continuous asynchronous receive loop.
-5. Decode and safely log initial state and readiness messages.
-6. Add tests for configuration and message decoding.
+1. Domain types for bundles, offers, advertisements, transactions, and
+   commitments, kept separate from the raw `bazaar_pb2` wire types (per the
+   assignment brief, trading logic should not repeatedly unpack transport
+   fields or rebuild resource arithmetic).
+2. Request ID generation/correlation, so a `result` can be matched back to
+   the command that produced it, including retry-with-same-ID and
+   `REQUEST_ID_CONFLICT` handling.
+3. Snapshot replacement by `snapshot_sequence`/`world_version`, keeping
+   server facts separate from local pending-command state (a newer snapshot
+   already includes settled trades; it must not be re-applied).
+4. Scenario orchestration for the ten-step exercise (`advertise`, `offer`,
+   `accept`, `withdraw`, the intentional `RATE_LIMITED`/capacity error, and
+   final `sync`), building on `session.run()`/`BazaarConnection.messages()`.
+5. Fixture-based tests for state handling (repeated snapshots must not
+   double-count trades) and integration tests running the full ten-step
+   exercise against the validator.
 
 Keep connection management, message encoding/decoding, state tracking, and
 scenario orchestration in separate modules rather than implementing everything

@@ -1,0 +1,7 @@
+[run]
+source = src/planet_charlu
+omit =
+    src/planet_charlu/generated/*
+
+[report]
+show_missing = True
