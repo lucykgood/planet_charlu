@@ -15,6 +15,16 @@ def test_describe_state_includes_phase_and_health():
     assert "self=P01" in summary
 
 
+def test_describe_state_includes_specialty_and_inventory():
+    message = bazaar_pb2.ServerMessage()
+    message.state.CopyFrom(make_state())
+
+    summary = describe_server_message(message)
+
+    assert "specialty=RESOURCE_WATER" in summary
+    assert "inventory=(water=30,food=30,components=30)" in summary
+
+
 def test_describe_result_includes_ok_and_code():
     message = bazaar_pb2.ServerMessage()
     message.result.CopyFrom(make_result(ok=True, code=bazaar_pb2.RESULT_CODE_OK))

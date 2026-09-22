@@ -56,7 +56,11 @@ async def perform_readiness_handshake(
     readiness = confirmation.readiness
     logger.info("received %s", describe_server_message(confirmation))
 
-    if not readiness.ready or readiness.run_id != state.run_id:
+    if (
+        not readiness.ready
+        or readiness.run_id != state.run_id
+        or readiness.snapshot_sequence != state.snapshot_sequence
+    ):
         raise HandshakeError(f"readiness confirmation did not match request: {readiness}")
 
     return state

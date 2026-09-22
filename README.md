@@ -33,7 +33,8 @@ client communicates over WebSockets, not gRPC.
 - [x] Authentication implemented
 - [x] Continuous receive loop implemented
 - [x] Initial state and readiness messages decoded and safely logged
-- [ ] Domain model (offers, advertisements, transactions, commitments)
+- [x] Domain model (bundles, offers, advertisements, transactions, commitments)
+- [ ] Request ID correlation and phase gating for trading commands
 - [ ] Ten-step validation exercise completed
 - [ ] Final validation report reviewed
 
@@ -65,6 +66,15 @@ planet_charlu/
 │       ├── session.py
 │       ├── logging_utils.py
 │       ├── main.py
+│       ├── domain/
+│       │   ├── __init__.py
+│       │   ├── resources.py
+│       │   ├── offers.py
+│       │   ├── advertisements.py
+│       │   ├── transactions.py
+│       │   ├── station.py
+│       │   ├── outcomes.py
+│       │   └── world.py
 │       └── generated/
 │           ├── __init__.py
 │           └── bazaar_pb2.py
@@ -76,7 +86,14 @@ planet_charlu/
 │   ├── test_logging_utils.py
 │   ├── test_main.py
 │   ├── test_proto.py
-│   └── test_session.py
+│   ├── test_session.py
+│   ├── test_domain_resources.py
+│   ├── test_domain_offers.py
+│   ├── test_domain_advertisements.py
+│   ├── test_domain_transactions.py
+│   ├── test_domain_station.py
+│   ├── test_domain_outcomes.py
+│   └── test_domain_world.py
 └── validator/
     ├── spaceport-validate-linux-arm64
     └── spaceport-validate-linux-x86_64
@@ -249,11 +266,49 @@ socket:
 
 This slice implements the required connection sequence through readiness
 (steps 1-4 of the brief's five-step sequence) and a continuous receive loop
-that logs every subsequent message. It intentionally does not yet send
-trading commands (`advertise`/`offer`/`accept`/`withdraw`) or track offers,
-advertisements, and transactions as domain objects — that is the next branch,
-building on `BazaarConnection.messages()` and `session.run()` as the
-foundation.
+that logs every subsequent message. It does not yet send trading commands
+(`advertise`/`offer`/`accept`/`withdraw`) or correlate command results back
+to the request that caused them — that's the next branch, building on
+`BazaarConnection.messages()`, `session.run()`, and the domain model below.
+
+## Domain model
+
+`src/planet_charlu/domain/` turns raw `bazaar_pb2` wire messages into small,
+immutable Python value objects, so trading logic reads `offer.is_open()`
+instead of comparing against a raw `OFFER_STATUS_OPEN` int, and never
+repeats resource arithmetic inline. Every type has a `from_wire()`
+classmethod and no other way to construct one from server data.
+
+| Type (`domain/...`) | Wraps | Adds |
+| --- | --- | --- |
+| `Bundle` (`resources.py`) | `bazaar_pb2.Bundle` | Non-negative-only arithmetic: `covers()`, `minus()` (raises if unaffordable), `saturating_subtract()` (clamps at zero for estimates). |
+| `Resource` (`resources.py`) | `bazaar_pb2.Resource` | A Python enum (`WATER`/`FOOD`/`COMPONENTS`) instead of a raw int. |
+| `Offer` (`offers.py`) | `bazaar_pb2.Offer` | `is_open()`, `is_gift()`, `is_expired_by(tick)`, `proposed_by()`/`directed_to()`. |
+| `Advertisement` (`advertisements.py`) | `bazaar_pb2.Advertisement` | `is_active()`, `is_help_request()`, `is_expired_by(tick)`. |
+| `Transaction` (`transactions.py`) | `bazaar_pb2.Transaction` | `involves(station_id)`. |
+| `StationSelf` (`station.py`) | `bazaar_pb2.StationObservation` | `had_full_upkeep_last_tick()`; keeps only the fields reserve-protection/survival logic needs today. |
+| `CommandOutcome` (`outcomes.py`) | `bazaar_pb2.Result` | `code_name` for logging; unwraps the `Nullable*` wire fields to plain `Optional[...]`. |
+| `WorldView` (`world.py`) | a whole `bazaar_pb2.State` | `is_running()`, `open_offers_from_me()`/`open_offers_to_me()`, `committed_bundle()`, `available_bundle()`. |
+
+**`WorldView` is the snapshot tracker.** It's built fresh from a whole
+`State` via `WorldView.from_state(state)` and never mutated — a newer
+snapshot means calling `from_state` again and replacing the caller's
+reference, not patching fields on an existing instance. That structurally
+rules out the bug the brief warns about most: re-applying a transaction a
+new snapshot's inventory already includes, since there's no in-place update
+path that could double-apply anything.
+
+**Commitments, not reservations.** The server does not reserve stock when
+an offer is posted ("no reservation... multiple offers can promise the same
+stock"), so `WorldView.committed_bundle()` is our own bookkeeping — the sum
+of `give` bundles across our own currently open offers — and
+`available_bundle()` is `inventory.saturating_subtract(committed_bundle())`.
+It's an estimate we maintain client-side, not a server-verified balance.
+
+This does not yet include request ID correlation (matching a `result` back
+to the command that caused it) or phase gating (blocking trading commands
+unless `phase == PHASE_RUNNING`) — both need the client to be sending
+trading commands first, which is the next branch's job.
 
 ## Configuration
 
@@ -323,7 +378,7 @@ the readiness handshake:
 ```text
 INFO __main__: starting Planet CharLu client: ClientConfig(ws_url='ws://127.0.0.1:3001/ws', station_id='P01', token='***redacted***')
 INFO planet_charlu.connection: connected to ws://127.0.0.1:3001/ws (subprotocol=bazaar.protobuf.v2)
-INFO planet_charlu.session: initial state seq=1 world_version=2 tick=0 phase=PHASE_RUNNING self=P01 health=100
+INFO planet_charlu.session: initial state seq=1 world_version=2 tick=0 phase=PHASE_RUNNING self=P01 health=100 specialty=RESOURCE_WATER inventory=(water=30,food=30,components=30)
 INFO planet_charlu.session: received readiness run_id=<run id> ready=True seq=1
 INFO planet_charlu.session: readiness confirmed for run_id=<run id>; entering continuous receive loop
 ```
@@ -379,16 +434,37 @@ Covered so far, module by module:
   exchanged, binary frames round-trip, an unexpected text frame is rejected,
   and calling `send`/`messages` before `connect` fails clearly.
 - `session.py`: the readiness handshake in isolation (wrong first message,
-  wrong second message, mismatched `run_id`) and the full `run()` loop
-  end-to-end against a fake server.
-- `logging_utils.py`: one summary per message kind, including the unset case.
+  wrong second message, mismatched `run_id`, mismatched readiness
+  `snapshot_sequence`) and the full `run()` loop end-to-end against a fake
+  server. One test pins the validator's exact Step 1 scenario end-to-end —
+  station `P01`, inventory `(30,30,30)`, specialty water, P02 advertising
+  food for water — decoded through `WorldView`, so a regression in either
+  the handshake or the domain model fails a test instead of only showing up
+  by eye against a live validator.
+- `logging_utils.py`: one summary per message kind, including the unset
+  case; the `state` summary asserts on the specialty and inventory fields
+  it now includes.
 - `main.py`: the `ConfigError` → exit-1 path, the happy path wiring
   `load_config` into `session.run`, and swallowing `KeyboardInterrupt`.
+- `domain/resources.py`: `Bundle` arithmetic (`covers`/`minus`/
+  `saturating_subtract`), negative-quantity rejection, and `Resource`
+  wire round trips.
+- `domain/offers.py`, `domain/advertisements.py`: `from_wire` mapping,
+  status checks, gift/help-request detection, and the exclusive
+  expiry-tick boundary (`is_expired_by(expires_tick)` is `True`, one tick
+  earlier is `False`).
+- `domain/transactions.py`, `domain/station.py`, `domain/outcomes.py`:
+  `from_wire` field mapping and each type's small helper methods.
+- `domain/world.py`: building a `WorldView` from a full `State` fixture,
+  filtering open offers by proposer/recipient, `committed_bundle()` summing
+  only our own open offers, and `available_bundle()` clamping at zero when
+  overcommitted. Also checked live against a real snapshot from the
+  validator (correctly decoded P02's real advertisement into `Resource`
+  enum values).
 
 Not yet covered, because the underlying feature does not exist yet: request
-ID correlation/retries, offer/advertisement/transaction domain objects, and
-the full ten-step validation sequence. Those land with the domain-model and
-decision-policy branches.
+ID correlation/retries, phase gating on trading commands, and the full
+ten-step validation sequence. Those land with the next branch.
 
 ## Optional: local virtual environment
 
@@ -445,28 +521,35 @@ validation targets, not values to hard-code into the client.
 ## Next task
 
 `feature/websocket-connection` implemented and validated the connection,
-authentication, codec, and readiness handshake described above (see
+authentication, codec, and readiness handshake (see
 [Client architecture](#client-architecture)); step 1 of the required
 validation scenario passes against the real validator binary.
 
-The next feature branch should build the domain model and drive steps 2-10:
+`feature/domain-model` added `src/planet_charlu/domain/` (see
+[Domain model](#domain-model)): `Bundle`/`Offer`/`Advertisement`/
+`Transaction`/`StationSelf`/`CommandOutcome` value types and a `WorldView`
+snapshot tracker with commitment accounting, all tested against both
+fixtures and a real snapshot from the validator.
 
-1. Domain types for bundles, offers, advertisements, transactions, and
-   commitments, kept separate from the raw `bazaar_pb2` wire types (per the
-   assignment brief, trading logic should not repeatedly unpack transport
-   fields or rebuild resource arithmetic).
-2. Request ID generation/correlation, so a `result` can be matched back to
+The next feature branch should wire the domain model into `session.py` and
+drive steps 2-10:
+
+1. Request ID generation/correlation, so a `result` can be matched back to
    the command that produced it, including retry-with-same-ID and
    `REQUEST_ID_CONFLICT` handling.
-3. Snapshot replacement by `snapshot_sequence`/`world_version`, keeping
-   server facts separate from local pending-command state (a newer snapshot
-   already includes settled trades; it must not be re-applied).
-4. Scenario orchestration for the ten-step exercise (`advertise`, `offer`,
-   `accept`, `withdraw`, the intentional `RATE_LIMITED`/capacity error, and
-   final `sync`), building on `session.run()`/`BazaarConnection.messages()`.
-5. Fixture-based tests for state handling (repeated snapshots must not
-   double-count trades) and integration tests running the full ten-step
-   exercise against the validator.
+2. Phase gating: refuse to send `advertise`/`offer`/`accept`/`withdraw`
+   unless the latest `WorldView.is_running()` is true.
+3. Command builders for `advertise`/`offer`/`accept`/`withdraw` in
+   `codec.py`, alongside the existing `build_ready`/`build_sync`.
+4. Scenario orchestration for the ten-step exercise, building on
+   `session.run()`/`BazaarConnection.messages()` and `WorldView` for
+   tracking state as each step's snapshot arrives.
+5. Fixture-based tests confirming a repeated/duplicate snapshot doesn't
+   double-count a transaction, and an integration test running the full
+   ten-step exercise against the validator, checking the documented final
+   inventory (28 water, 31 food, 31 components).
+6. A first explainable policy (protect upkeep reserves using
+   `WorldView.available_bundle()`, discover suppliers via advertisements).
 
 Keep connection management, message encoding/decoding, state tracking, and
 scenario orchestration in separate modules rather than implementing everything
