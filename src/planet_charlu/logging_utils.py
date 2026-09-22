@@ -26,10 +26,14 @@ def describe_server_message(message: bazaar_pb2.ServerMessage) -> str:
 
     if kind == "state":
         state = message.state
+        inventory = state.self.inventory
         return (
             f"state seq={state.snapshot_sequence} world_version={state.world_version} "
             f"tick={state.tick} phase={bazaar_pb2.Phase.Name(state.phase)} "
-            f"self={state.self_station_id} health={state.self.health}"
+            f"self={state.self_station_id} health={state.self.health} "
+            f"specialty={bazaar_pb2.Resource.Name(state.self.specialty)} "
+            f"inventory=(water={inventory.water},food={inventory.food},"
+            f"components={inventory.components})"
         )
     if kind == "result":
         result = message.result

@@ -9,10 +9,12 @@ import websockets
 
 from planet_charlu.config import ClientConfig
 from planet_charlu.connection import BazaarConnection, REQUIRED_SUBPROTOCOL
+from planet_charlu.domain.resources import Resource
+from planet_charlu.domain.world import WorldView
 from planet_charlu.generated import bazaar_pb2
 from planet_charlu.session import HandshakeError, perform_readiness_handshake, run
 
-from fixtures import make_readiness, make_result, make_state
+from fixtures import make_advertisement, make_readiness, make_result, make_state
 
 
 async def _serve(handler):
@@ -129,6 +131,84 @@ async def test_handshake_raises_if_readiness_does_not_match_run_id():
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def test_handshake_raises_if_readiness_snapshot_sequence_mismatches():
+    async def handler(websocket):
+        state_message = bazaar_pb2.ServerMessage()
+        state_message.state.CopyFrom(make_state(run_id="run-1", snapshot_sequence=1))
+        await websocket.send(state_message.SerializeToString())
+
+        await websocket.recv()  # the client's ready message
+
+        readiness_message = bazaar_pb2.ServerMessage()
+        readiness_message.readiness.CopyFrom(
+            make_readiness(run_id="run-1", ready=True, snapshot_sequence=2)
+        )
+        await websocket.send(readiness_message.SerializeToString())
+        await websocket.close()
+
+    server, url = await _serve(handler)
+    try:
+        config = ClientConfig(ws_url=url, token="t", station_id="P01")
+        async with BazaarConnection(config) as connection:
+            messages = connection.messages()
+            with pytest.raises(HandshakeError, match="did not match"):
+                await perform_readiness_handshake(connection, messages)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+async def test_handshake_step1_scenario_matches_validator_spec():
+    """Pins validator/README.md's exact Step 1 "Check" bullets: P01,
+    inventory (30,30,30), specialty water, and P02 selling food/seeking
+    water. ``make_state``'s defaults already model this scenario; this test
+    exists so a future change to those defaults (or to WorldView decoding)
+    that breaks the documented scenario fails loudly here instead of only
+    being caught by eye against a live validator.
+    """
+    p02_ad = make_advertisement(station_id="P02")
+
+    async def handler(websocket):
+        state_message = bazaar_pb2.ServerMessage()
+        state_message.state.CopyFrom(
+            make_state(run_id="run-1", snapshot_sequence=1, advertisements=[p02_ad])
+        )
+        await websocket.send(state_message.SerializeToString())
+
+        await websocket.recv()  # the client's ready message
+
+        readiness_message = bazaar_pb2.ServerMessage()
+        readiness_message.readiness.CopyFrom(
+            make_readiness(run_id="run-1", ready=True, snapshot_sequence=1)
+        )
+        await websocket.send(readiness_message.SerializeToString())
+        await websocket.close()
+
+    server, url = await _serve(handler)
+    try:
+        config = ClientConfig(ws_url=url, token="t", station_id="P01")
+        async with BazaarConnection(config) as connection:
+            messages = connection.messages()
+            state = await perform_readiness_handshake(connection, messages)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert state.world_version == 2
+    assert state.snapshot_sequence == 1
+
+    world = WorldView.from_state(state)
+    assert world.self_station_id == "P01"
+    assert world.self.inventory.water == 30
+    assert world.self.inventory.food == 30
+    assert world.self.inventory.components == 30
+    assert world.self.specialty is Resource.WATER
+    assert any(
+        ad.posted_by("P02") and Resource.FOOD in ad.selling and Resource.WATER in ad.seeking
+        for ad in world.advertisements
+    )
 
 
 async def test_run_completes_handshake_then_logs_until_server_closes():
