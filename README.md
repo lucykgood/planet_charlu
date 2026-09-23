@@ -587,20 +587,24 @@ that:
   true. Verified manually against a live validator through all ten steps of
   the sample scenario, using `ClientSession` instead of hand-rolled message
   pumping.
+- `scenario.py`: `run_sample_scenario(session)` drives steps 2-10 on top of
+  an already-open `ClientSession`, following `validator/README.md`'s
+  request IDs and ordering exactly, and raises `ScenarioError` the moment a
+  server response stops matching the documented exercise. `main.py` now
+  wires this into the real client entry point instead of the simpler
+  `session.run()` loop. Verified end-to-end against a live validator run
+  (matching `validation-report.json`'s `"status": "sample exchange
+  completed"`, `"last_completed_step": 10`, and the documented final
+  inventory) and covered by `tests/test_scenario.py` against a scripted
+  fake server.
 
 Still to do on this branch:
 
 1. Retry-with-same-`request_id` and `REQUEST_ID_CONFLICT` handling on top
    of `PendingRequests`.
-2. The actual ten-step scenario driver, built on `ClientSession.send()` and
-   `session.world`, and wired into `main.py` so the real client (not just a
-   manual script) runs it.
-3. Fixture-based tests confirming a repeated/duplicate snapshot doesn't
-   double-count a transaction, and an automated integration test running
-   the full ten-step exercise against the validator, checking the
-   documented final inventory (28 water, 31 food, 31 components) — turning
-   the manual verification above into something CI/the test suite can run.
-4. A first explainable policy (protect upkeep reserves using
+2. A fixture-based test confirming a repeated/duplicate snapshot doesn't
+   double-count a transaction.
+3. A first explainable policy (protect upkeep reserves using
    `WorldView.available_bundle()`, discover suppliers via advertisements).
 
 Keep connection management, message encoding/decoding, state tracking, and
