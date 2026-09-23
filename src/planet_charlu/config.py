@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
-DEFAULT_WS_URL = "ws://127.0.0.1:3001/ws"
+DEFAULT_WS_URL = "wss://spaceport.edneo.com/ws"
 DEFAULT_STATION_ID = "P01"
 DEFAULT_CREDENTIALS_FILE = "validation-credentials.json"
 
