@@ -18,10 +18,12 @@ def test_main_exits_with_status_1_on_config_error(monkeypatch):
     assert excinfo.value.code == 1
 
 
-def test_main_runs_session_with_resolved_config(monkeypatch):
+@pytest.mark.parametrize("mode", ["trade", "validation"])
+def test_main_runs_session_with_resolved_config(monkeypatch, mode):
     config = ClientConfig(ws_url="ws://x/ws", token="t", station_id="P01")
     monkeypatch.setattr(main_module, "load_config", lambda: config)
 
+    config.mode = mode
     seen = {}
 
     class FakeConnection:
@@ -48,7 +50,7 @@ def test_main_runs_session_with_resolved_config(monkeypatch):
 
     monkeypatch.setattr(main_module, "BazaarConnection", FakeConnection)
     monkeypatch.setattr(main_module, "open_session", fake_open_session)
-    monkeypatch.setattr(main_module, "run_sample_scenario", fake_run_sample_scenario)
+    monkeypatch.setattr(main_module, "run_sample_scenario" if mode == "validation" else "run_trading", fake_run_sample_scenario)
 
     main_module.main()
 

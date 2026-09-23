@@ -29,6 +29,7 @@ class ClientConfig:
     ws_url: str
     token: str
     station_id: str
+    mode: str = "trade"
 
     def __repr__(self) -> str:
         return (
@@ -88,6 +89,8 @@ def _build_parser(env: Mapping[str, str]) -> argparse.ArgumentParser:
         default=env.get("BAZAAR_STATION_ID", DEFAULT_STATION_ID),
         help="Station ID to select from the credentials file (env: BAZAAR_STATION_ID)",
     )
+    parser.add_argument("--mode", choices=("trade", "validation"), default="trade",
+                        help="Continuous cooperative trading (default) or the validator exercise")
     return parser
 
 
@@ -107,4 +110,4 @@ def load_config(
     if not token:
         token = _token_from_credentials_file(Path(args.credentials_file), args.station_id)
 
-    return ClientConfig(ws_url=args.ws_url, token=token, station_id=args.station_id)
+    return ClientConfig(ws_url=args.ws_url, token=token, station_id=args.station_id, mode=args.mode)

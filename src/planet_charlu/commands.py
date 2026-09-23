@@ -69,6 +69,15 @@ class PendingRequests:
         if future is not None and not future.done():
             future.set_exception(exc)
 
+    def fail_all(self, exc: BaseException) -> None:
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(exc)
+        self._pending.clear()
+
+    def discard(self, request_id: str) -> None:
+        self._pending.pop(request_id, None)
+
     def _pop_pending(self, request_id: str) -> "asyncio.Future[CommandOutcome] | None":
         future = self._pending.pop(request_id, None)
         if future is None:
@@ -93,5 +102,8 @@ async def send_command(
     decoded ``result`` -- this only registers the future and sends.
     """
     future = pending.register(request_id)
-    await connection.send(message)
-    return await future
+    try:
+        await connection.send(message)
+        return await future
+    finally:
+        pending.discard(request_id)

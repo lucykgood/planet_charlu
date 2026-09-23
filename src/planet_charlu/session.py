@@ -1,10 +1,4 @@
-"""Scenario orchestration: the required connection sequence and receive loop.
-
-Steps 1-4 of the required connection sequence (connect, read initial state,
-send ready, wait for readiness) live here. Sending trading commands once the
-run is confirmed RUNNING is out of scope for this module; it only proves the
-handshake and keeps listening.
-"""
+"""Readiness, snapshot tracking, and command/result correlation."""
 
 from __future__ import annotations
 
@@ -96,6 +90,7 @@ class ClientSession:
         self.world = world
         self._pump_task: Optional["asyncio.Task[None]"] = None
         self._world_updated = asyncio.Event()
+        self._pump_error: Exception | None = None
 
     def start_pump(self) -> None:
         self._pump_task = asyncio.create_task(self._pump())
@@ -109,21 +104,36 @@ class ClientSession:
         self._pump_task = None
 
     async def _pump(self) -> None:
-        async for message in self._messages:
-            logger.info("received %s", describe_server_message(message))
-            kind = message.WhichOneof("message")
-            if kind == "state":
-                self.world = WorldView.from_state(message.state)
-                self._world_updated.set()
-            elif kind == "result":
-                self._pending.resolve(CommandOutcome.from_wire(message.result))
-            elif kind == "protocol_error":
-                error = message.protocol_error
-                if not error.request_id.null:
-                    self._pending.reject(
-                        error.request_id.value,
-                        ProtocolErrorReceived(code=error.code, close_session=error.close_session),
-                    )
+        try:
+            async for message in self._messages:
+                logger.info("received %s", describe_server_message(message))
+                kind = message.WhichOneof("message")
+                if kind == "state":
+                    if message.state.run_id != self.world.run_id:
+                        raise ConnectionError("server changed run; restart the client for the new run")
+                    if message.state.snapshot_sequence <= self.world.snapshot_sequence:
+                        continue
+                    self.world = WorldView.from_state(message.state)
+                    self._world_updated.set()
+                elif kind == "result":
+                    self._pending.resolve(CommandOutcome.from_wire(message.result))
+                elif kind == "protocol_error":
+                    error = message.protocol_error
+                    if not error.request_id.null:
+                        self._pending.reject(
+                            error.request_id.value,
+                            ProtocolErrorReceived(code=error.code, close_session=error.close_session),
+                        )
+    
+                    if error.close_session or error.request_id.null:
+                        raise ProtocolErrorReceived(code=error.code, close_session=error.close_session)
+        except Exception as exc:
+            self._pump_error = exc
+        finally:
+            if self._pump_error is None:
+                self._pump_error = ConnectionError("server connection closed")
+            self._pending.fail_all(self._pump_error)
+            self._world_updated.set()
 
     async def send(self, *, request_id: str, message: bazaar_pb2.ClientMessage) -> CommandOutcome:
         """Send a trading command and await its correlated result.
@@ -134,6 +144,8 @@ class ClientSession:
         with a ``protocol_error`` for this ``request_id`` rather than a
         ``result`` -- e.g. the required intentional-error validation step.
         """
+        if self._pump_error is not None:
+            raise self._pump_error
         if not self.world.is_running():
             raise NotRunningError(f"cannot send while phase={self.world.phase!r}")
         return await send_command(
@@ -141,7 +153,7 @@ class ClientSession:
         )
 
     async def wait_for(
-        self, predicate: Callable[[WorldView], bool], *, timeout: float = 5.0
+        self, predicate: Callable[[WorldView], bool], *, timeout: float | None = 5.0
     ) -> WorldView:
         """Block until the pump applies a ``WorldView`` satisfying ``predicate``.
 
@@ -152,6 +164,8 @@ class ClientSession:
         """
         async def _wait() -> None:
             while not predicate(self.world):
+                if self._pump_error is not None:
+                    raise self._pump_error
                 self._world_updated.clear()
                 if predicate(self.world):
                     return

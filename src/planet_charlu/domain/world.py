@@ -22,6 +22,21 @@ from planet_charlu.generated import bazaar_pb2
 
 
 @dataclass(frozen=True)
+class TradingRules:
+    duration_ticks: int = 100
+    max_publication_ttl_ticks: int = 10
+    max_offer_ttl_ticks: int = 3
+    new_commands_per_station_per_tick: int = 1
+    max_request_records_per_station: int = 100
+    max_open_outgoing_offers: int = 8
+    max_command_bytes: int = 16384
+
+    @classmethod
+    def from_wire(cls, rules):
+        return cls(**{name: getattr(rules, name) for name in cls.__dataclass_fields__})
+
+
+@dataclass(frozen=True)
 class WorldView:
     run_id: str
     tick: int
@@ -35,9 +50,14 @@ class WorldView:
     transactions: Tuple[Transaction, ...]
     request_results: Tuple[CommandOutcome, ...]
 
+    rules: TradingRules = TradingRules()
+    directory: Tuple[str, ...] = ()
+
     @classmethod
     def from_state(cls, state: bazaar_pb2.State) -> "WorldView":
         return cls(
+            rules=TradingRules.from_wire(state.rules),
+            directory=tuple(item.station_id for item in state.directory.items),
             run_id=state.run_id,
             tick=state.tick,
             phase=state.phase,
