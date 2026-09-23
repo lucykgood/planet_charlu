@@ -89,13 +89,19 @@ async def run_sample_scenario(session: ClientSession) -> WorldView:
     logger.info("scenario step 4/10 done: offer_id=%s", our_offer_id)
 
     # Steps 5-6: P02 accepts our offer and separately offers us a gift, both
-    # arriving as state pushes with no command of ours in between.
-    world = await session.wait_for(
-        lambda world: any(
+    # arriving as state pushes with no command of ours in between. Both
+    # conditions must be checked against the *same* wait_for predicate --
+    # waiting on "accepted" alone can return as soon as step 5's push lands,
+    # before the pump has applied step 6's separate gift push.
+    def _accepted_and_gifted(world: WorldView) -> bool:
+        accepted = any(
             offer.offer_id == our_offer_id and offer.status is OfferStatus.ACCEPTED
             for offer in world.offers
         )
-    )
+        gifted = any(offer.is_gift() for offer in world.open_offers_to_me())
+        return accepted and gifted
+
+    world = await session.wait_for(_accepted_and_gifted)
     gift = next((offer for offer in world.open_offers_to_me() if offer.is_gift()), None)
     _require(gift is not None, "steps 5-6: no gift offer from P02 after our offer was accepted")
     logger.info("scenario steps 5-6/10 done: gift offer_id=%s", gift.offer_id)
