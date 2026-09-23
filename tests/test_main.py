@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from planet_charlu import main as main_module
@@ -22,10 +24,31 @@ def test_main_runs_session_with_resolved_config(monkeypatch):
 
     seen = {}
 
-    async def fake_run(passed_config):
-        seen["config"] = passed_config
+    class FakeConnection:
+        def __init__(self, passed_config):
+            seen["config"] = passed_config
 
-    monkeypatch.setattr(main_module.session, "run", fake_run)
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    class FakeSession:
+        world = SimpleNamespace(self=SimpleNamespace(inventory=None), transactions=[])
+
+        async def stop_pump(self):
+            pass
+
+    async def fake_open_session(connection):
+        return FakeSession()
+
+    async def fake_run_sample_scenario(session):
+        return session.world
+
+    monkeypatch.setattr(main_module, "BazaarConnection", FakeConnection)
+    monkeypatch.setattr(main_module, "open_session", fake_open_session)
+    monkeypatch.setattr(main_module, "run_sample_scenario", fake_run_sample_scenario)
 
     main_module.main()
 

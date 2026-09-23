@@ -26,12 +26,28 @@ class DuplicateRequestIdError(RuntimeError):
     """Raised when a request_id is registered while still awaiting a prior result."""
 
 
+class ProtocolErrorReceived(RuntimeError):
+    """Raised from ``send_command`` when the server answers with a protocol_error
+    instead of a result -- e.g. CONTROL_CODE_REQUEST_CAPACITY_EXCEEDED, which the
+    wire protocol never pairs with a ``result`` for the offending request_id.
+    """
+
+    def __init__(self, *, code: int, close_session: bool) -> None:
+        self.code = code
+        self.close_session = close_session
+        super().__init__(
+            f"protocol_error code={bazaar_pb2.ControlCode.Name(code)} "
+            f"close_session={close_session}"
+        )
+
+
 def generate_request_id() -> str:
     return uuid.uuid4().hex
 
 
 class PendingRequests:
-    """Tracks in-flight commands and resolves them as ``result`` messages arrive."""
+    """Tracks in-flight commands and resolves them as ``result``/``protocol_error``
+    messages arrive."""
 
     def __init__(self) -> None:
         self._pending: Dict[str, "asyncio.Future[CommandOutcome]"] = {}
@@ -44,15 +60,23 @@ class PendingRequests:
         return future
 
     def resolve(self, outcome: CommandOutcome) -> None:
-        future = self._pending.pop(outcome.request_id, None)
+        future = self._pop_pending(outcome.request_id)
+        if future is not None and not future.done():
+            future.set_result(outcome)
+
+    def reject(self, request_id: str, exc: BaseException) -> None:
+        future = self._pop_pending(request_id)
+        if future is not None and not future.done():
+            future.set_exception(exc)
+
+    def _pop_pending(self, request_id: str) -> "asyncio.Future[CommandOutcome] | None":
+        future = self._pending.pop(request_id, None)
         if future is None:
             logger.warning(
-                "received result for unknown or already-resolved request_id=%s",
-                outcome.request_id,
+                "received outcome for unknown or already-resolved request_id=%s",
+                request_id,
             )
-            return
-        if not future.done():
-            future.set_result(outcome)
+        return future
 
 
 async def send_command(
