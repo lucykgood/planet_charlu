@@ -5,6 +5,7 @@ import pytest
 from planet_charlu.commands import (
     DuplicateRequestIdError,
     PendingRequests,
+    ProtocolErrorReceived,
     generate_request_id,
     send_command,
 )
@@ -53,6 +54,29 @@ def test_resolve_ignores_unknown_request_id():
 
     # Should not raise even though nothing registered "req-unknown".
     pending.resolve(CommandOutcome.from_wire(make_result(request_id="req-unknown")))
+
+
+async def test_reject_sets_exception_on_pending_future():
+    pending = PendingRequests()
+    future = pending.register("req-1")
+
+    error = ProtocolErrorReceived(
+        code=bazaar_pb2.CONTROL_CODE_REQUEST_CAPACITY_EXCEEDED, close_session=False
+    )
+    pending.reject("req-1", error)
+
+    with pytest.raises(ProtocolErrorReceived):
+        await asyncio.wait_for(future, timeout=1)
+
+
+def test_reject_ignores_unknown_request_id():
+    pending = PendingRequests()
+
+    # Should not raise even though nothing registered "req-unknown".
+    pending.reject(
+        "req-unknown",
+        ProtocolErrorReceived(code=bazaar_pb2.CONTROL_CODE_BAD_MESSAGE, close_session=True),
+    )
 
 
 async def test_resolve_after_future_already_cancelled_does_not_raise():

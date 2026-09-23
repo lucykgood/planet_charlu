@@ -35,8 +35,8 @@ client communicates over WebSockets, not gRPC.
 - [x] Initial state and readiness messages decoded and safely logged
 - [x] Domain model (bundles, offers, advertisements, transactions, commitments)
 - [x] Trading command builders (`advertise`/`offer`/`accept`/`withdraw`) and request ID correlation
-- [ ] Phase gating and `WorldView` wired into the receive loop
-- [ ] Ten-step validation exercise completed
+- [x] Phase gating and `WorldView` wired into a live session (`ClientSession`)
+- [x] Ten-step validation exercise scripted and running as part of the client
 - [ ] Final validation report reviewed
 
 Update this list as work is merged into `main`. Do not mark an item complete
@@ -68,6 +68,7 @@ planet_charlu/
 │       ├── session.py
 │       ├── logging_utils.py
 │       ├── main.py
+│       ├── scenario.py
 │       ├── domain/
 │       │   ├── __init__.py
 │       │   ├── resources.py
@@ -89,6 +90,7 @@ planet_charlu/
 │   ├── test_logging_utils.py
 │   ├── test_main.py
 │   ├── test_proto.py
+│   ├── test_scenario.py
 │   ├── test_session.py
 │   ├── test_domain_resources.py
 │   ├── test_domain_offers.py
@@ -263,21 +265,24 @@ socket:
 | `config.py` | Resolving the endpoint, station ID, and token from CLI flags, environment variables, or `validation-credentials.json`. Redacts the token from `repr`/`str`. |
 | `codec.py` | Binary Protobuf encode/decode and building `ClientMessage` payloads (`ready`, `sync`, `advertise`, `offer`, `accept`, `withdraw`). |
 | `connection.py` | The WebSocket lifecycle: connecting with the `Authorization` header and `bazaar.protobuf.v2` subprotocol, verifying the server selected it, sending, and a `messages()` async generator that decodes each binary frame as a `ServerMessage`. |
-| `commands.py` | Request ID correlation: `PendingRequests` tracks in-flight commands as futures keyed by `request_id`, `send_command()` sends a built message and awaits the matching `result`. |
-| `session.py` | Scenario orchestration: the required connect → read state → send ready → await readiness sequence (`perform_readiness_handshake`), then a continuous receive loop (`run`). |
+| `commands.py` | Request ID correlation: `PendingRequests` tracks in-flight commands as futures keyed by `request_id` and resolves them from either a successful `result` or a failing `protocol_error` (`ProtocolErrorReceived`); `send_command()` sends a built message and awaits the matching outcome. |
+| `session.py` | Scenario orchestration: the required connect → read state → send ready → await readiness sequence (`perform_readiness_handshake`); `run()`, a continuous receive loop that just logs; and `ClientSession`/`open_session()`, a live session that tracks the current `WorldView`, gates sends on `is_running()`, and correlates commands via `commands.py` as its background pump processes incoming messages. |
 | `logging_utils.py` | Turning a decoded `ServerMessage` into a one-line, safe-to-log summary (never touches the token, which lives only in the connection header). |
-| `main.py` | Wiring: load config, run the session, translate `ConfigError`/`KeyboardInterrupt` into a clean exit. |
+| `scenario.py` | `run_sample_scenario(session)`: drives steps 2-10 of the guided exercise on top of an already-open `ClientSession` (step 1 is `open_session()`'s job), following `validator/README.md`'s request IDs and ordering exactly, and raises `ScenarioError` if a server response stops matching the documented exercise. |
+| `main.py` | Wiring: load config, open a `ClientSession`, run `run_sample_scenario`, translate `ConfigError`/`ScenarioError`/`KeyboardInterrupt` into a clean exit. |
 
 This slice implements the required connection sequence through readiness
-(steps 1-4 of the brief's five-step sequence) and a continuous receive loop
-that logs every subsequent message. `codec.py` can now build all four
-trading commands and `commands.py` can correlate a sent command with its
-async `result`, but nothing calls them yet: `session.run()` still only
-logs incoming messages, has no phase gating against `WorldView.is_running()`,
-and does not resolve incoming `result` messages through `PendingRequests`.
-Wiring those together and driving the ten-step scenario is the next slice
-of this branch, building on
-`BazaarConnection.messages()`, `session.run()`, and the domain model below.
+(steps 1-4 of the brief's five-step sequence). `codec.py` can build all four
+trading commands, and `session.ClientSession` ties everything built so far
+together into a usable live session: `open_session(connection)` completes
+the handshake, then starts a pump task that keeps `session.world` (a
+`WorldView`) current from every incoming `state`, resolves outgoing
+commands' `PendingRequests` from `result`/`protocol_error` messages, and
+`session.send(request_id=..., message=...)` refuses to send unless the
+latest `WorldView.is_running()` is true. `main.py` now drives the full
+ten-step exercise through `scenario.run_sample_scenario(client_session)`
+rather than the simpler `session.run()` receive loop, and has been verified
+end-to-end against a live validator run.
 
 ## Domain model
 
@@ -439,11 +444,11 @@ Covered so far, module by module:
   four trading command builders (`build_advertise`/`build_offer`/
   `build_accept`/`build_withdraw`) has a test asserting its required fields
   are set correctly.
-- `commands.py`: `PendingRequests.register`/`resolve` in isolation (a
-  registered future resolves with the matching outcome, a duplicate
-  `request_id` raises, an unknown or already-resolved `request_id` is
-  ignored rather than raising), and `send_command` end-to-end against a
-  fake connection.
+- `commands.py`: `PendingRequests.register`/`resolve`/`reject` in isolation
+  (a registered future resolves with the matching outcome or rejects with a
+  `ProtocolErrorReceived`, a duplicate `request_id` raises, an unknown or
+  already-resolved `request_id` is ignored rather than raising), and
+  `send_command` end-to-end against a fake connection.
 - `connection.py`: the `Authorization` header and subprotocol are sent and
   verified against a real local WebSocket server (`websockets.serve`, no
   validator binary needed), a subprotocol mismatch raises before any data is
@@ -456,7 +461,12 @@ Covered so far, module by module:
   station `P01`, inventory `(30,30,30)`, specialty water, P02 advertising
   food for water — decoded through `WorldView`, so a regression in either
   the handshake or the domain model fails a test instead of only showing up
-  by eye against a live validator.
+  by eye against a live validator. `ClientSession`/`open_session()` are
+  covered separately: `world` updates as new `state` messages arrive on the
+  pump, `send()` raises `NotRunningError` when the latest phase isn't
+  RUNNING, a successful command's `result` resolves `send()`'s return value,
+  and a `protocol_error` for the same `request_id` raises
+  `ProtocolErrorReceived` instead.
 - `logging_utils.py`: one summary per message kind, including the unset
   case; the `state` summary asserts on the specialty and inventory fields
   it now includes.
@@ -479,9 +489,17 @@ Covered so far, module by module:
   enum values).
 
 Not yet covered, because the underlying feature does not exist yet: retries
-on `REQUEST_ID_CONFLICT`, phase gating on trading commands, `WorldView`
-wired into `session.run()`'s receive loop, and the full ten-step validation
-sequence. Those are next on this branch.
+on `REQUEST_ID_CONFLICT`, and a fixture-based test confirming a
+repeated/duplicate snapshot doesn't double-count a transaction. Those are
+next on this branch.
+
+- `scenario.py`: `run_sample_scenario` end-to-end against a scripted fake
+  server that reproduces the validator's exact ten-step sample exchange
+  (`test_run_sample_scenario_matches_validator_spec`, asserting the final
+  `WorldView` matches the documented inventory/version/transaction counts),
+  plus two failure-path tests (`ScenarioError` when a step's `result` isn't
+  `ok`, and when the deliberately-erroring step 9 succeeds instead of
+  failing).
 
 ## Optional: local virtual environment
 
@@ -548,32 +566,41 @@ validation scenario passes against the real validator binary.
 snapshot tracker with commitment accounting, all tested against both
 fixtures and a real snapshot from the validator.
 
-`feature/trading-commands` (in progress) has so far added:
+`feature/trading-commands` added command builders for
+`advertise`/`offer`/`accept`/`withdraw` in `codec.py`, and `commands.py`'s
+`PendingRequests`/`send_command()` for correlating a sent command with its
+async `result`. Verified manually against a live validator run through all
+ten steps of the documented sample scenario.
 
-- Command builders for `advertise`/`offer`/`accept`/`withdraw` in
-  `codec.py`, alongside the existing `build_ready`/`build_sync`.
-- `commands.py`: `PendingRequests`, a table of futures keyed by
-  `request_id` that lets `send_command()` send a built message and await
-  the `result` the server eventually sends back for it.
+`feature/scenario-orchestration` (in progress) has so far added, on top of
+that:
 
-Still to do on this branch, to wire the above into a working scenario and
-drive steps 2-10:
+- `commands.py`: `PendingRequests.reject()` and `ProtocolErrorReceived`, so
+  a command answered with a `protocol_error` instead of a `result` (e.g.
+  the required intentional-error validation step) fails its awaiter with an
+  exception instead of hanging forever.
+- `session.py`: `ClientSession`/`open_session()` — a live session whose
+  background pump task keeps `session.world` (a `WorldView`) current from
+  every incoming `state`, resolves or rejects outgoing commands'
+  `PendingRequests` from `result`/`protocol_error` messages, and whose
+  `send()` refuses to send unless the latest `WorldView.is_running()` is
+  true. Verified manually against a live validator through all ten steps of
+  the sample scenario, using `ClientSession` instead of hand-rolled message
+  pumping.
+
+Still to do on this branch:
 
 1. Retry-with-same-`request_id` and `REQUEST_ID_CONFLICT` handling on top
    of `PendingRequests`.
-2. Phase gating: refuse to send `advertise`/`offer`/`accept`/`withdraw`
-   unless the latest `WorldView.is_running()` is true.
-3. Wire `WorldView` into `session.run()`'s receive loop (build a fresh one
-   from every `state` message) and resolve incoming `result` messages
-   through `PendingRequests.resolve()`.
-4. Scenario orchestration for the ten-step exercise, building on
-   `session.run()`/`BazaarConnection.messages()` and `WorldView` for
-   tracking state as each step's snapshot arrives.
-5. Fixture-based tests confirming a repeated/duplicate snapshot doesn't
-   double-count a transaction, and an integration test running the full
-   ten-step exercise against the validator, checking the documented final
-   inventory (28 water, 31 food, 31 components).
-6. A first explainable policy (protect upkeep reserves using
+2. The actual ten-step scenario driver, built on `ClientSession.send()` and
+   `session.world`, and wired into `main.py` so the real client (not just a
+   manual script) runs it.
+3. Fixture-based tests confirming a repeated/duplicate snapshot doesn't
+   double-count a transaction, and an automated integration test running
+   the full ten-step exercise against the validator, checking the
+   documented final inventory (28 water, 31 food, 31 components) — turning
+   the manual verification above into something CI/the test suite can run.
+4. A first explainable policy (protect upkeep reserves using
    `WorldView.available_bundle()`, discover suppliers via advertisements).
 
 Keep connection management, message encoding/decoding, state tracking, and

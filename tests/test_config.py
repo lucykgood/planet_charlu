@@ -8,7 +8,7 @@ from planet_charlu.config import ClientConfig, ConfigError, load_config
 def test_defaults_apply_when_nothing_else_given():
     config = load_config(argv=["--token", "inline-token"], env={})
 
-    assert config.ws_url == "ws://127.0.0.1:3001/ws"
+    assert config.ws_url == "wss://spaceport.edneo.com/ws"
     assert config.station_id == "P01"
     assert config.token == "inline-token"
 

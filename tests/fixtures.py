@@ -246,13 +246,19 @@ def make_result(
 
 
 def make_protocol_error(
-    *, code: int = bazaar_pb2.CONTROL_CODE_BAD_MESSAGE, close_session: bool = False
+    *,
+    code: int = bazaar_pb2.CONTROL_CODE_BAD_MESSAGE,
+    close_session: bool = False,
+    request_id: str | None = None,
 ) -> bazaar_pb2.ProtocolError:
     error = bazaar_pb2.ProtocolError()
     error.type = bazaar_pb2.PROTOCOL_ERROR_TYPE_PROTOCOL_ERROR
     error.protocol_version = "2.0"
     error.run_id.null = True
-    error.request_id.null = True
+    if request_id is None:
+        error.request_id.null = True
+    else:
+        error.request_id.value = request_id
     error.code = code
     error.close_session = close_session
     return error
