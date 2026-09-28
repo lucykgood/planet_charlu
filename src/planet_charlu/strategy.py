@@ -64,7 +64,18 @@ class SelfSufficientStrategy:
     (production can fall short of its own upkeep), that is a survival
     exception: we seek and accept trades for it too, funded from whichever
     other resource we can spare, exactly like any other critical resource.
+
+    ``max_request_records_per_station`` is a lifetime budget, not a
+    per-tick one -- routine advertising and offering can exhaust it long
+    before the run ends if left unpaced, leaving no capacity for even a
+    free gift or a safety withdrawal for however many ticks remain.
+    EMERGENCY_RESERVE keeps a small floor of that budget off-limits to
+    routine spending (new ads, non-critical seeking, specialty gifts) once
+    it starts running low; withdrawing unsafe commitments, accepting a
+    gift, and rescuing a critical resource are never rationed by it.
     """
+    EMERGENCY_RESERVE = 4
+
     def __init__(self) -> None:
         self.tick = -1
         self.attempted: set[str] = set()
@@ -128,6 +139,8 @@ class SelfSufficientStrategy:
         specialty = world.self.specialty
         not_produced = frozenset(RESOURCES) - {specialty}
         common = dict(run_id=world.run_id, request_id=generate_request_id())
+        budget_left = rules.max_request_records_per_station - max(self.sent_total, len(world.request_results))
+        routine_ok = budget_left > self.EMERGENCY_RESERVE
 
         def decision(key, reason, message):
             if key in self.attempted or len(codec.encode_client_message(message)) > rules.max_command_bytes:
@@ -178,7 +191,9 @@ class SelfSufficientStrategy:
             units_out = sum(quantity(offer.receive, r) for r in RESOURCES)
             favorable_or_equal = units_in >= units_out
             nets_needed = any(r in seeking and quantity(offer.give, r) > quantity(offer.receive, r) for r in RESOURCES)
-            if pays_only_specialty and favorable_or_equal and nets_needed:
+            # A rescue is never rationed; a routine favorable trade is, once
+            # the emergency reserve is all that's left of the lifetime budget.
+            if pays_only_specialty and favorable_or_equal and nets_needed and (routine_ok or rescues_critical(offer)):
                 result = decision('accept:' + offer.offer_id, 'accept favorable-or-equal trade for a resource we need',
                                   codec.build_accept(**common, offer_id=offer.offer_id))
                 if result:
@@ -192,7 +207,7 @@ class SelfSufficientStrategy:
         ad = own_ads[0] if own_ads else None
         refresh = ad is None or ad.expires_tick <= world.tick + 1
         changed = ad is not None and (ad.selling != selling or ad.seeking != seeking)
-        if (selling or seeking) and (refresh or (changed and world.tick >= self.last_ad_tick + 3)):
+        if routine_ok and (selling or seeking) and (refresh or (changed and world.tick >= self.last_ad_tick + 3)):
             ttl = min(10, rules.max_publication_ttl_ticks, remaining)
             if ttl > 0:
                 result = decision('advertise', 'publish specialty surplus and unproduced-resource needs', codec.build_advertise(
@@ -203,7 +218,11 @@ class SelfSufficientStrategy:
 
         if len(outgoing) >= rules.max_open_outgoing_offers:
             return None
-        ttl = min(2, rules.max_offer_ttl_ticks, remaining)
+        # Give a partner a real window to notice and act on the offer before
+        # it expires -- too short a TTL just forces repeated re-offering
+        # (and repeated budget spend) without giving them more of a chance
+        # to accept.
+        ttl = min(5, rules.max_offer_ttl_ticks, remaining)
         if ttl <= 0:
             return None
         # Retain upkeep across the offer's lifetime, in addition to the reserve.
@@ -218,6 +237,12 @@ class SelfSufficientStrategy:
         wanted = sorted(seeking, key=lambda r: (r not in critical,
                          quantity(available, r) / max(1, quantity(world.self.upkeep_per_tick, r))))
         for need in wanted:
+            urgent = need in critical
+            if not urgent and not routine_ok:
+                # Recovering a critical resource is never rationed; seeking
+                # one that's merely below the routine 6-tick target is, once
+                # the emergency reserve is all that's left of the budget.
+                continue
             # An ad is only a claim; once a partner has actually delivered
             # this resource, stop trusting anyone else's unconfirmed claim.
             confirmed = self.confirmed_suppliers_of(need)
@@ -246,16 +271,18 @@ class SelfSufficientStrategy:
                             expires_tick=world.tick + ttl))
                     if result:
                         return result
-        # Help advertised specialty shortages with small gifts, rotating partners.
-        for ad in ads:
-            amount = min(2, quantity(spendable, specialty))
-            if specialty not in ad.seeking or amount <= 0:
-                continue
-            result = decision('partner:' + ad.station_id, f'share surplus {specialty.value} with {ad.station_id}',
-                codec.build_offer(**common, recipient_id=ad.station_id, give=bundle_of(specialty, amount),
-                                  receive=Bundle.zero(), expires_tick=world.tick + ttl))
-            if result:
-                return result
+        # Help advertised specialty shortages with small gifts, rotating
+        # partners -- pure generosity, so it's the first thing rationed.
+        if routine_ok:
+            for ad in ads:
+                amount = min(2, quantity(spendable, specialty))
+                if specialty not in ad.seeking or amount <= 0:
+                    continue
+                result = decision('partner:' + ad.station_id, f'share surplus {specialty.value} with {ad.station_id}',
+                    codec.build_offer(**common, recipient_id=ad.station_id, give=bundle_of(specialty, amount),
+                                      receive=Bundle.zero(), expires_tick=world.tick + ttl))
+                if result:
+                    return result
         return None
 
     def record(self, decision: Decision) -> None:

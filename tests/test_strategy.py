@@ -55,7 +55,7 @@ def test_trade_for_shortage_with_arbitrary_partner():
     assert body.recipient_id == 'TEAM-Z'
     assert Bundle.from_wire(body.give) == Bundle(water=4)
     assert Bundle.from_wire(body.receive) == Bundle(food=4)
-    assert body.expires_tick == 2
+    assert body.expires_tick == 5
 
 
 def test_critical_recovery_dips_into_offer_lifetime_buffer():
@@ -237,6 +237,43 @@ def test_rate_capacity_and_message_size_limits():
     assert strategy.choose(replace(w, tick=1)) is not None
     assert SelfSufficientStrategy().choose(replace(w, rules=replace(w.rules, max_command_bytes=1))) is None
     assert SelfSufficientStrategy().choose(replace(w, rules=replace(w.rules, max_request_records_per_station=0))) is None
+
+
+def test_routine_advertising_suppressed_once_budget_reserve_reached():
+    # max_request_records_per_station is a lifetime cap, not a per-tick one.
+    # Abundant inventory means nothing is critical or even needed -- but it
+    # would still advertise its specialty surplus, if not for the budget.
+    w = world(inventory=(30, 30, 30))
+    w = replace(w, rules=replace(w.rules, max_request_records_per_station=10))
+    assert SelfSufficientStrategy().choose(w).message.WhichOneof('message') == 'advertise'
+    strategy = SelfSufficientStrategy()
+    strategy.sent_total = 10 - SelfSufficientStrategy.EMERGENCY_RESERVE  # only the reserve is left
+    assert strategy.choose(w) is None
+
+
+def test_non_critical_seeking_suppressed_once_budget_reserve_reached():
+    # components=5 is below the 6-tick target (a routine need) but not the
+    # 3-tick reserve (not critical). With only the emergency reserve left,
+    # seeking it is rationed even though a matching ad exists.
+    w = world(inventory=(30, 30, 5),
+              ads=[make_advertisement(station_id='P04', selling=[pb.RESOURCE_COMPONENTS], seeking=[pb.RESOURCE_WATER])])
+    w = replace(w, rules=replace(w.rules, max_request_records_per_station=10))
+    strategy = SelfSufficientStrategy()
+    strategy.sent_total = 10 - SelfSufficientStrategy.EMERGENCY_RESERVE
+    assert strategy.choose(w) is None
+
+
+def test_critical_recovery_not_rationed_by_emergency_reserve():
+    # Default food=2 is critical. Even with only the emergency reserve left
+    # of the lifetime budget, recovering a critical resource is never
+    # rationed -- unlike the routine cases above.
+    w = world(ads=[make_advertisement(station_id='P03')])
+    w = replace(w, rules=replace(w.rules, max_request_records_per_station=10))
+    strategy = SelfSufficientStrategy()
+    strategy.sent_total = 10 - SelfSufficientStrategy.EMERGENCY_RESERVE
+    action = strategy.choose(w)
+    assert action is not None and action.message.WhichOneof('message') == 'offer'
+    assert action.message.offer.body.recipient_id == 'P03'
 
 
 def test_short_ttl_open_offer_limit_and_failed_station():
