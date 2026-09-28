@@ -1,10 +1,7 @@
-"""WorldView: one immutable, fully-formed snapshot of the world.
+"""Immutable views built from complete server snapshots.
 
-Built fresh from a whole ``bazaar_pb2.State`` via ``from_state`` -- never
-mutated in place. A newer snapshot means calling ``from_state`` again and
-replacing the caller's reference, not patching fields on an existing
-instance. That structurally rules out the bug the brief warns about most:
-re-applying a transaction a new snapshot's inventory already includes.
+Replace the previous view when a new snapshot arrives. Inventory already
+includes settled transactions; applying them again would double-count trades.
 """
 
 from __future__ import annotations
@@ -32,7 +29,7 @@ class TradingRules:
     max_command_bytes: int = 16384
 
     @classmethod
-    def from_wire(cls, rules):
+    def from_wire(cls, rules: bazaar_pb2.PublicRules) -> "TradingRules":
         return cls(**{name: getattr(rules, name) for name in cls.__dataclass_fields__})
 
 
@@ -109,8 +106,7 @@ class WorldView:
     def available_bundle(self) -> Bundle:
         """Inventory minus our own open commitments, clamped at zero.
 
-        Clamped (not raised) because the server allows multiple offers to
-        promise the same stock; if we've overcommitted on paper, the honest
-        answer is "nothing left," not a crash.
+        Multiple offers may promise the same stock, so commitments can
+        exceed inventory without any resources having moved.
         """
         return self.self.inventory.saturating_subtract(self.committed_bundle())

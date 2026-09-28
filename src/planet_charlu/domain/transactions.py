@@ -1,10 +1,4 @@
-"""Transaction domain type: a settled, completed exchange.
-
-Distinct from ``Offer`` on purpose: an offer is a proposal that may never
-settle, a transaction is proof two bundles already moved. Confusing the two
-would risk double-counting a trade that a snapshot's inventory already
-reflects.
-"""
+"""Settled exchanges already reflected in snapshot inventory."""
 
 from __future__ import annotations
 

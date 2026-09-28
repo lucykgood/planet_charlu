@@ -113,6 +113,7 @@ class ClientSession:
                         raise ConnectionError("server changed run; restart the client for the new run")
                     if message.state.snapshot_sequence <= self.world.snapshot_sequence:
                         continue
+                    # Snapshots already include settled trades; never replay them.
                     self.world = WorldView.from_state(message.state)
                     self._world_updated.set()
                 elif kind == "result":
@@ -124,7 +125,7 @@ class ClientSession:
                             error.request_id.value,
                             ProtocolErrorReceived(code=error.code, close_session=error.close_session),
                         )
-    
+
                     if error.close_session or error.request_id.null:
                         raise ProtocolErrorReceived(code=error.code, close_session=error.close_session)
         except Exception as exc:

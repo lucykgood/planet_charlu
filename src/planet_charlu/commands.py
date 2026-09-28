@@ -1,11 +1,7 @@
-"""Request ID correlation: matching an async ``result`` back to its command.
+"""Correlate command results and protocol errors with awaiting callers.
 
-The server's ``result`` messages arrive interleaved with ``state`` messages
-on the same receive loop and carry only a ``request_id`` -- nothing that
-says which call sent it. ``PendingRequests`` is a table of futures keyed by
-``request_id``: a caller registers one before sending, and whoever is
-running the receive loop resolves it when the matching ``result`` shows up,
-so ``send_command`` can look like an ordinary awaitable call.
+Register each future before sending; the session receive pump completes it
+while continuing to process interleaved snapshots.
 """
 
 from __future__ import annotations

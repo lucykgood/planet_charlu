@@ -1,10 +1,4 @@
-"""Offer domain type: an exact proposed exchange, from the proposer's side.
-
-``give``/``receive`` are always from the proposer's perspective, per the
-wire schema. Wrapping the raw ``bazaar_pb2.Offer`` here means the rest of
-the codebase asks ``offer.is_open()`` instead of comparing against a raw
-``OFFER_STATUS_OPEN`` int scattered through decision code.
-"""
+"""Proposed exchanges whose give/receive bundles use the proposer's perspective."""
 
 from __future__ import annotations
 

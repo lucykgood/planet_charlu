@@ -1,627 +1,183 @@
-# Planet CharLu — SpacePort Bazaar Client
+# Planet CharLu
 
-Planet CharLu builds a Python client for the
-SpacePort Bazaar protocol. The client connects to the course-provided validator over WebSockets, exchanges binary Protocol Buffer messages,
-tracks marketplace state, and completes the required ten-step trading exercise as
-player **P01** while the validator controls **P02**.
+A Python 3.11 client for the SpacePort Bazaar trading protocol. It exchanges
+binary Protocol Buffer messages over WebSockets, tracks full server snapshots,
+and supports two modes:
 
-The project is a command-line client. 
+- **Trade** (default): cooperative trading based on inventory, upkeep reserves,
+  incoming offers, and public advertisements.
+- **Validation**: the fixed ten-step P01/P02 exercise served by the bundled
+  Linux validator.
 
-## Technology choices
+Start here for setup and operation. See [ARCHITECTURE.md](ARCHITECTURE.md) for
+module responsibilities, decision flow, and the test map. The
+[validator guide](validator/README.md) defines the practice exchange; the wire
+schema lives in [protos/bazaar.proto](protos/bazaar.proto).
 
-- Python 3.11
-- `asyncio` and `websockets`
-- Protocol Buffers with `protobuf` and `grpcio-tools`
-- `pytest` and `pytest-asyncio`
-- Docker Compose for a consistent Linux development environment
+## Development setup
 
-`grpcio-tools` is used only to generate Python classes from `bazaar.proto`; the
-client communicates over WebSockets, not gRPC.
+Run commands from the repository root. Clone this repository, then choose either
+Docker (includes the Linux runtime needed by the validator) or a local Python
+environment.
 
-## Current status
+### Docker
 
-- [x] GitHub repository created and collaborator added
-- [x] Repository structure created
-- [x] Python dependencies configured
-- [x] Protobuf schema added
-- [x] Protocol classes generated and imported successfully
-- [x] Protobuf smoke tests passing
-- [x] Docker development environment configured and verified
-- [x] Validator binary selected and started successfully in Docker
-- [x] Python client entry point runs
-- [x] WebSocket connection implemented
-- [x] Authentication implemented
-- [x] Continuous receive loop implemented
-- [x] Initial state and readiness messages decoded and safely logged
-- [x] Domain model (bundles, offers, advertisements, transactions, commitments)
-- [x] Trading command builders (`advertise`/`offer`/`accept`/`withdraw`) and request ID correlation
-- [x] Phase gating and `WorldView` wired into a live session (`ClientSession`)
-- [x] Ten-step validation exercise scripted and running as part of the client
-- [ ] Final validation report reviewed
-
-Update this list as work is merged into `main`. Do not mark an item complete
-until it works from a fresh clone using the instructions below.
-
-## Repository layout
-
-```text
-planet_charlu/
-├── README.md
-├── requirements.txt
-├── Dockerfile
-├── compose.yaml
-├── .dockerignore
-├── .gitignore
-├── protos/
-│   └── bazaar.proto
-├── scripts/
-│   ├── generate_proto.sh
-│   ├── verify_proto.sh
-│   └── run_validator.sh
-├── src/
-│   └── planet_charlu/
-│       ├── __init__.py
-│       ├── config.py
-│       ├── codec.py
-│       ├── connection.py
-│       ├── commands.py
-│       ├── session.py
-│       ├── logging_utils.py
-│       ├── main.py
-│       ├── scenario.py
-│       ├── domain/
-│       │   ├── __init__.py
-│       │   ├── resources.py
-│       │   ├── offers.py
-│       │   ├── advertisements.py
-│       │   ├── transactions.py
-│       │   ├── station.py
-│       │   ├── outcomes.py
-│       │   └── world.py
-│       └── generated/
-│           ├── __init__.py
-│           └── bazaar_pb2.py
-├── tests/
-│   ├── fixtures.py
-│   ├── test_config.py
-│   ├── test_codec.py
-│   ├── test_connection.py
-│   ├── test_commands.py
-│   ├── test_logging_utils.py
-│   ├── test_main.py
-│   ├── test_proto.py
-│   ├── test_scenario.py
-│   ├── test_session.py
-│   ├── test_domain_resources.py
-│   ├── test_domain_offers.py
-│   ├── test_domain_advertisements.py
-│   ├── test_domain_transactions.py
-│   ├── test_domain_station.py
-│   ├── test_domain_outcomes.py
-│   └── test_domain_world.py
-└── validator/
-    ├── spaceport-validate-linux-arm64
-    └── spaceport-validate-linux-x86_64
-```
-
-## Where should I run commands?
-
-There are only two environments you need to distinguish in the recommended
-workflow:
-
-| Environment | How to recognize it | Use it for |
-|---|---|---|
-| Host terminal | Normal macOS, Windows, or Linux terminal | Git, editing files, and starting or stopping Docker |
-| Container terminal | Opened with `docker compose exec app bash`; the prompt may begin with `root@...:/workspace#` | Python, Protobuf generation, tests, validator, and client |
-
-The **Docker container** is the Linux environment. A **Docker terminal** is
-simply a shell opened inside that running container; they are not separate
-environments.
-
-A local `.venv` is optional. It is useful when running Python directly on the
-host without Docker, but it is not required for the recommended Docker workflow.
-Do not activate `.venv` inside the container—Docker already has its own isolated
-Python installation.
-
-In short:
-
-- Run `git ...` and `docker compose ...` in the host terminal.
-- Run `python ...`, `pytest`, and `./scripts/...` in the container terminal.
-- Use `.venv` only when intentionally running Python outside Docker.
-
-## First-time setup
-
-### 1. Clone the repository on the host
-
-```bash
-git clone https://github.com/lucykgood/planet_charlu.git
-cd planet_charlu
-```
-
-### 2. Build and start the development container
-
-Make sure Docker Desktop is running, then use the host terminal:
+With Docker and Compose installed and running:
 
 ```bash
 docker compose up --detach --build
-docker compose ps
-```
-
-The `app` service should show as running.
-
-### 3. Enter the container
-
-```bash
 docker compose exec app bash
 ```
 
-The repository is mounted at `/workspace`, so edits made on the host are
-immediately visible in the container.
-
-### 4. Verify the setup inside the container
+Inside the container:
 
 ```bash
-python --version
-./scripts/verify_proto.sh
-python -m pytest -v
-python -m planet_charlu.main
+python -m pytest -q
+python -m planet_charlu.main --help
 ```
 
-Expected results:
+The repository is mounted at `/workspace`; edits are shared with the host.
+Python dependencies and `PYTHONPATH` are configured in the image. Rebuild after
+changing `requirements.txt` or `Dockerfile`. Run `docker compose down` on the
+host to stop the development container.
 
-- Python reports version 3.11.
-- Protobuf generation and import succeed.
-- Tests pass.
-- The client entry point runs without an import error.
-
-If these commands pass, first-time setup is complete.
-
-## Returning to the project
-
-Use this sequence each time you return.
-
-### Host terminal
+### Local Python
 
 ```bash
-cd /path/to/planet_charlu
-git switch main
-git pull --ff-only
-docker compose up --detach
-docker compose ps
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+export PYTHONPATH="$PWD/src"
+python -m pytest -q
+python -m planet_charlu.main --help
 ```
 
-If `requirements.txt`, `Dockerfile`, or `compose.yaml` changed after pulling,
-rebuild instead:
+Activate the environment and set `PYTHONPATH` in each new shell. The client and
+tests can run on macOS or Linux; the bundled validator requires Linux. On
+Windows, use the Docker workflow or a Linux environment such as WSL.
 
-```bash
-docker compose up --detach --build
-```
+Tests do not need credentials or a running Bazaar server. Some start temporary
+WebSocket servers on localhost, so the environment must allow local sockets.
 
-Create a branch for new work:
+## Run the practice exchange
 
-```bash
-git switch -c feature/short-description
-```
-
-Then enter the container:
-
-```bash
-docker compose exec app bash
-```
-
-### Container terminal
-
-Before coding, run:
-
-```bash
-./scripts/verify_proto.sh
-python -m pytest -v
-```
-
-When finished, type `exit` to leave the container shell. The container continues
-running in the background until you stop it from the host:
-
-```bash
-docker compose down
-```
-
-`docker compose down` does not delete the repository or source code.
-
-## Protobuf generation
-
-The source schema is `protos/bazaar.proto`. Generate `bazaar_pb2.py` inside the
-container with:
-
-```bash
-./scripts/generate_proto.sh
-```
-
-Verify generation and import together with:
-
-```bash
-./scripts/verify_proto.sh
-```
-
-Do not manually edit `src/planet_charlu/generated/bazaar_pb2.py`; regenerate it
-from the schema. Do not add `--grpc_python_out` because this project does not use
-gRPC networking.
-
-When `bazaar.proto` changes, regenerate and run the tests before committing:
-
-```bash
-./scripts/generate_proto.sh
-python -m pytest -v
-git diff -- src/planet_charlu/generated
-```
-
-## Client architecture
-
-Each module owns one responsibility, so state tracking and decision logic
-never depend on network calls, and each layer can be tested without a live
-socket:
-
-| Module | Owns |
-| --- | --- |
-| `config.py` | Resolving the endpoint, station ID, and token from CLI flags, environment variables, or `validation-credentials.json`. Redacts the token from `repr`/`str`. |
-| `codec.py` | Binary Protobuf encode/decode and building `ClientMessage` payloads (`ready`, `sync`, `advertise`, `offer`, `accept`, `withdraw`). |
-| `connection.py` | The WebSocket lifecycle: connecting with the `Authorization` header and `bazaar.protobuf.v2` subprotocol, verifying the server selected it, sending, and a `messages()` async generator that decodes each binary frame as a `ServerMessage`. |
-| `commands.py` | Request ID correlation: `PendingRequests` tracks in-flight commands as futures keyed by `request_id` and resolves them from either a successful `result` or a failing `protocol_error` (`ProtocolErrorReceived`); `send_command()` sends a built message and awaits the matching outcome. |
-| `session.py` | Scenario orchestration: the required connect → read state → send ready → await readiness sequence (`perform_readiness_handshake`); `run()`, a continuous receive loop that just logs; and `ClientSession`/`open_session()`, a live session that tracks the current `WorldView`, gates sends on `is_running()`, and correlates commands via `commands.py` as its background pump processes incoming messages. |
-| `logging_utils.py` | Turning a decoded `ServerMessage` into a one-line, safe-to-log summary (never touches the token, which lives only in the connection header). |
-| `scenario.py` | `run_sample_scenario(session)`: drives steps 2-10 of the guided exercise on top of an already-open `ClientSession` (step 1 is `open_session()`'s job), following `validator/README.md`'s request IDs and ordering exactly, and raises `ScenarioError` if a server response stops matching the documented exercise. |
-| `main.py` | Wiring: load config, open a `ClientSession`, run `run_sample_scenario`, translate `ConfigError`/`ScenarioError`/`KeyboardInterrupt` into a clean exit. |
-
-This slice implements the required connection sequence through readiness
-(steps 1-4 of the brief's five-step sequence). `codec.py` can build all four
-trading commands, and `session.ClientSession` ties everything built so far
-together into a usable live session: `open_session(connection)` completes
-the handshake, then starts a pump task that keeps `session.world` (a
-`WorldView`) current from every incoming `state`, resolves outgoing
-commands' `PendingRequests` from `result`/`protocol_error` messages, and
-`session.send(request_id=..., message=...)` refuses to send unless the
-latest `WorldView.is_running()` is true. `main.py` now drives the full
-ten-step exercise through `scenario.run_sample_scenario(client_session)`
-rather than the simpler `session.run()` receive loop, and has been verified
-end-to-end against a live validator run.
-
-## Domain model
-
-`src/planet_charlu/domain/` turns raw `bazaar_pb2` wire messages into small,
-immutable Python value objects, so trading logic reads `offer.is_open()`
-instead of comparing against a raw `OFFER_STATUS_OPEN` int, and never
-repeats resource arithmetic inline. Every type has a `from_wire()`
-classmethod and no other way to construct one from server data.
-
-| Type (`domain/...`) | Wraps | Adds |
-| --- | --- | --- |
-| `Bundle` (`resources.py`) | `bazaar_pb2.Bundle` | Non-negative-only arithmetic: `covers()`, `minus()` (raises if unaffordable), `saturating_subtract()` (clamps at zero for estimates). |
-| `Resource` (`resources.py`) | `bazaar_pb2.Resource` | A Python enum (`WATER`/`FOOD`/`COMPONENTS`) instead of a raw int. |
-| `Offer` (`offers.py`) | `bazaar_pb2.Offer` | `is_open()`, `is_gift()`, `is_expired_by(tick)`, `proposed_by()`/`directed_to()`. |
-| `Advertisement` (`advertisements.py`) | `bazaar_pb2.Advertisement` | `is_active()`, `is_help_request()`, `is_expired_by(tick)`. |
-| `Transaction` (`transactions.py`) | `bazaar_pb2.Transaction` | `involves(station_id)`. |
-| `StationSelf` (`station.py`) | `bazaar_pb2.StationObservation` | `had_full_upkeep_last_tick()`; keeps only the fields reserve-protection/survival logic needs today. |
-| `CommandOutcome` (`outcomes.py`) | `bazaar_pb2.Result` | `code_name` for logging; unwraps the `Nullable*` wire fields to plain `Optional[...]`. |
-| `WorldView` (`world.py`) | a whole `bazaar_pb2.State` | `is_running()`, `open_offers_from_me()`/`open_offers_to_me()`, `committed_bundle()`, `available_bundle()`. |
-
-**`WorldView` is the snapshot tracker.** It's built fresh from a whole
-`State` via `WorldView.from_state(state)` and never mutated — a newer
-snapshot means calling `from_state` again and replacing the caller's
-reference, not patching fields on an existing instance. That structurally
-rules out the bug the brief warns about most: re-applying a transaction a
-new snapshot's inventory already includes, since there's no in-place update
-path that could double-apply anything.
-
-**Commitments, not reservations.** The server does not reserve stock when
-an offer is posted ("no reservation... multiple offers can promise the same
-stock"), so `WorldView.committed_bundle()` is our own bookkeeping — the sum
-of `give` bundles across our own currently open offers — and
-`available_bundle()` is `inventory.saturating_subtract(committed_bundle())`.
-It's an estimate we maintain client-side, not a server-verified balance.
-
-This does not yet include request ID correlation (matching a `result` back
-to the command that caused it) or phase gating (blocking trading commands
-unless `phase == PHASE_RUNNING`) — both need the client to be sending
-trading commands first, which is the next branch's job.
-
-## Configuration
-
-No source edit is needed to point the client at a different server or
-station. Every setting can be set by CLI flag or environment variable (CLI
-flags win):
-
-| Setting | CLI flag | Environment variable | Default |
-| --- | --- | --- | --- |
-| WebSocket endpoint | `--ws-url` | `BAZAAR_WS_URL` | `ws://127.0.0.1:3001/ws` |
-| Bearer token | `--token` | `BAZAAR_TOKEN` | *(none; falls back to the credentials file)* |
-| Credentials file | `--credentials-file` | `BAZAAR_CREDENTIALS_FILE` | `validation-credentials.json` |
-| Station ID | `--station-id` | `BAZAAR_STATION_ID` | `P01` |
-
-If `--token`/`BAZAAR_TOKEN` is not given, the client reads the token for
-`--station-id` out of the credentials file's `players` list — the same file
-the validator writes. The token is never printed: `ClientConfig.__repr__`
-always shows `token='***redacted***'`.
-
-Example: pointing at a different port without touching any source file:
-
-```bash
-python -m planet_charlu.main --ws-url ws://127.0.0.1:3002/ws --token "$BAZAAR_TOKEN"
-```
-
-## Run the validator and client
-
-The validator and client should run in two shells inside the same container so
-the client can use `ws://127.0.0.1:3001/ws`.
-
-### Terminal 1: validator
-
-From the host:
-
-```bash
-docker compose exec app bash
-```
-
-Then, inside the container:
+Start a fresh validator for each exercise. From a container shell at the
+repository root:
 
 ```bash
 ./scripts/run_validator.sh
 ```
 
-The validator does not support a standalone `--help` flag. The wrapper selects
-the ARM64 or x86-64 binary and supplies `--codec protobuf` automatically. Leave
-this terminal running.
-
-### Terminal 2: client
-
-Open another host terminal:
+Leave it running. In a second container shell (`docker compose exec app bash`
+from the host), run:
 
 ```bash
-cd /path/to/planet_charlu
-docker compose exec app bash
+python -m planet_charlu.main --mode validation --ws-url ws://127.0.0.1:3001/ws
 ```
 
-Then run inside the container:
+Both flags matter: the defaults select live trading and the hosted endpoint.
+The validator writes `validation-credentials.json`; the client reads P01's token
+from it unless a CLI or environment token overrides it. Clear `BAZAAR_TOKEN`
+when switching from a live server to validator credentials.
+
+A completed exchange leaves inventory at **28 water, 31 food, 31 components**.
+Check `validation-report.json` for `status: "sample exchange completed"` and
+`last_completed_step: 10`. With no extra syncs or retries, the client sends
+8 messages and receives 16.
+
+For stricter checks of the initial and final snapshots, restart the validator
+and run this **instead of** the normal client:
 
 ```bash
-python -m planet_charlu.main
+python scripts/check_validation.py
 ```
 
-Expect log lines like this, confirming the connection, the initial state, and
-the readiness handshake:
+This script defaults to the local validator and checks exact inventory, version,
+snapshot, transaction, and stored-result counts. It requires a fresh exercise.
+The automated scenario test uses a scripted server; this manual check verifies
+the bundled binary too.
 
-```text
-INFO __main__: starting Planet CharLu client: ClientConfig(ws_url='ws://127.0.0.1:3001/ws', station_id='P01', token='***redacted***')
-INFO planet_charlu.connection: connected to ws://127.0.0.1:3001/ws (subprotocol=bazaar.protobuf.v2)
-INFO planet_charlu.session: initial state seq=1 world_version=2 tick=0 phase=PHASE_RUNNING self=P01 health=100 specialty=RESOURCE_WATER inventory=(water=30,food=30,components=30)
-INFO planet_charlu.session: received readiness run_id=<run id> ready=True seq=1
-INFO planet_charlu.session: readiness confirmed for run_id=<run id>; entering continuous receive loop
-```
+## Connect to a trading run
 
-Cross-check `validation-report.json` in the validator's working directory:
-it should independently show `"last_completed_step": 1` and a matched
-`ready`/`readiness` exchange. The report proves the server's view of what
-was sent; the log lines above prove the client decoded and understood it —
-neither one alone is sufficient evidence.
-
-Stop the validator with `Ctrl+C`. Use `exit` to leave either container shell.
-
-The validator may create `validation-credentials.json` and
-`validation-report.json`. Both are local files ignored by Git. Never commit
-tokens, credentials, or private validation output.
-
-## Run tests
-
-Inside the container:
+Obtain the endpoint, station assignment, and token from the run organizer.
+Set `BAZAAR_TOKEN` in your shell, then run:
 
 ```bash
-python -m pytest -v
+python -m planet_charlu.main --mode trade \
+  --ws-url wss://spaceport.edneo.com/ws --station-id P01
 ```
 
-Run a particular test file with:
+Use the endpoint and station assigned to your team. The address above is the
+configured default, not a guarantee that a run is available. The station ID
+selects an entry when reading a credentials file; the server authenticates the
+actual station through the token.
+
+The strategy waits for a running phase, protects upkeep resources, and logs the
+reason for each action. It stops when the run finishes or aborts, the station
+fails, or the connection fails. Stop manually with Ctrl+C.
+
+### Configuration
+
+CLI flags take precedence over environment variables, then defaults. If no
+nonempty token is supplied, the client reads the selected station's token from
+the credentials file's `players` list.
+
+| Setting | CLI flag | Environment variable | Default |
+| --- | --- | --- | --- |
+| Endpoint | `--ws-url` | `BAZAAR_WS_URL` | `wss://spaceport.edneo.com/ws` |
+| Token | `--token` | `BAZAAR_TOKEN` | Read from credentials file |
+| Credentials file | `--credentials-file` | `BAZAAR_CREDENTIALS_FILE` | `validation-credentials.json` |
+| Station | `--station-id` | `BAZAAR_STATION_ID` | `P01` |
+| Mode | `--mode` | None | `trade` |
+
+There is no automatic `.env` loader. Keep tokens and validator output local;
+the default credential/report filenames are ignored by Git. Configuration
+logging redacts the token.
+
+## Making changes
+
+1. Create a branch and run the tests before editing.
+2. Use the [architecture map](ARCHITECTURE.md) to locate the relevant layer.
+   Keep policy changes in `strategy.py` and fixed validator steps in `scenario.py`.
+3. Add or update tests for behavior changes, then run:
+
+   ```bash
+   python -m pytest -q
+   python -m pytest --cov=planet_charlu --cov-report=term-missing
+   ```
+
+4. For protocol or scenario changes, also run a fresh practice exchange and
+   inspect its report. Unit tests alone do not verify the bundled validator.
+5. Update these instructions and the architecture map when commands, defaults,
+   boundaries, or operational limits change. Include verification results and
+   remaining limitations with the change so the next team can reproduce them.
+
+Dependencies are listed in `requirements.txt` and are not locked to exact
+versions. A fresh install can therefore resolve differently from an existing
+environment; include dependency versions when reporting setup regressions.
+
+### Protocol generation
+
+`src/planet_charlu/generated/bazaar_pb2.py` is a committed generated artifact so
+clones can import the protocol immediately. Edit the schema, not this file:
 
 ```bash
-python -m pytest tests/test_proto.py -v
+./scripts/generate_proto.sh
+python -m pytest -q
+git diff -- protos/bazaar.proto src/planet_charlu/generated/
 ```
 
-Measure coverage on handwritten code with:
+`./scripts/verify_proto.sh` regenerates the bindings and checks their import;
+it can change the generated file. Review and commit intentional schema/binding
+changes together. `grpcio-tools` supplies the generator; transport uses
+WebSockets, not gRPC.
 
-```bash
-python -m pytest --cov=planet_charlu --cov-report=term-missing
-```
+## Current limitations
 
-`.coveragerc` excludes `src/planet_charlu/generated/` from the report: it is
-machine-generated by `protoc` from `bazaar.proto`, not handwritten, and a
-coverage percentage there would say nothing about the client's correctness.
-`tests/test_proto.py` still smoke-tests that the generated bindings import
-and expose message classes.
-
-Covered so far, module by module:
-
-- `config.py`: CLI/env/default precedence, reading a token from a credentials
-  file, missing/malformed/empty-token failure paths, and token redaction.
-- `codec.py`: encode/decode round trips, that `false`/`0` survive (proto2
-  required fields, unlike proto3 optional fields, always serialize even
-  falsy values), and that malformed bytes raise `DecodeError`. Each of the
-  four trading command builders (`build_advertise`/`build_offer`/
-  `build_accept`/`build_withdraw`) has a test asserting its required fields
-  are set correctly.
-- `commands.py`: `PendingRequests.register`/`resolve`/`reject` in isolation
-  (a registered future resolves with the matching outcome or rejects with a
-  `ProtocolErrorReceived`, a duplicate `request_id` raises, an unknown or
-  already-resolved `request_id` is ignored rather than raising), and
-  `send_command` end-to-end against a fake connection.
-- `connection.py`: the `Authorization` header and subprotocol are sent and
-  verified against a real local WebSocket server (`websockets.serve`, no
-  validator binary needed), a subprotocol mismatch raises before any data is
-  exchanged, binary frames round-trip, an unexpected text frame is rejected,
-  and calling `send`/`messages` before `connect` fails clearly.
-- `session.py`: the readiness handshake in isolation (wrong first message,
-  wrong second message, mismatched `run_id`, mismatched readiness
-  `snapshot_sequence`) and the full `run()` loop end-to-end against a fake
-  server. One test pins the validator's exact Step 1 scenario end-to-end —
-  station `P01`, inventory `(30,30,30)`, specialty water, P02 advertising
-  food for water — decoded through `WorldView`, so a regression in either
-  the handshake or the domain model fails a test instead of only showing up
-  by eye against a live validator. `ClientSession`/`open_session()` are
-  covered separately: `world` updates as new `state` messages arrive on the
-  pump, `send()` raises `NotRunningError` when the latest phase isn't
-  RUNNING, a successful command's `result` resolves `send()`'s return value,
-  and a `protocol_error` for the same `request_id` raises
-  `ProtocolErrorReceived` instead.
-- `logging_utils.py`: one summary per message kind, including the unset
-  case; the `state` summary asserts on the specialty and inventory fields
-  it now includes.
-- `main.py`: the `ConfigError` → exit-1 path, the happy path wiring
-  `load_config` into `session.run`, and swallowing `KeyboardInterrupt`.
-- `domain/resources.py`: `Bundle` arithmetic (`covers`/`minus`/
-  `saturating_subtract`), negative-quantity rejection, and `Resource`
-  wire round trips.
-- `domain/offers.py`, `domain/advertisements.py`: `from_wire` mapping,
-  status checks, gift/help-request detection, and the exclusive
-  expiry-tick boundary (`is_expired_by(expires_tick)` is `True`, one tick
-  earlier is `False`).
-- `domain/transactions.py`, `domain/station.py`, `domain/outcomes.py`:
-  `from_wire` field mapping and each type's small helper methods.
-- `domain/world.py`: building a `WorldView` from a full `State` fixture,
-  filtering open offers by proposer/recipient, `committed_bundle()` summing
-  only our own open offers, and `available_bundle()` clamping at zero when
-  overcommitted. Also checked live against a real snapshot from the
-  validator (correctly decoded P02's real advertisement into `Resource`
-  enum values).
-
-Not yet covered, because the underlying feature does not exist yet: retries
-on `REQUEST_ID_CONFLICT`, and a fixture-based test confirming a
-repeated/duplicate snapshot doesn't double-count a transaction. Those are
-next on this branch.
-
-- `scenario.py`: `run_sample_scenario` end-to-end against a scripted fake
-  server that reproduces the validator's exact ten-step sample exchange
-  (`test_run_sample_scenario_matches_validator_spec`, asserting the final
-  `WorldView` matches the documented inventory/version/transaction counts),
-  plus two failure-path tests (`ScenarioError` when a step's `result` isn't
-  `ok`, and when the deliberately-erroring step 9 succeeds instead of
-  failing).
-
-## Optional: local virtual environment
-
-Use this only if you want to run Python directly on the host instead of Docker.
-Docker remains required for the Linux validator.
-
-Create the environment once:
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-On later sessions, reactivate it with:
-
-```bash
-source .venv/bin/activate
-```
-
-Leave it with:
-
-```bash
-deactivate
-```
-
-Changing directories does not deactivate a virtual environment. The `.venv`
-directory is ignored by Git and will not appear when another contributor clones
-the repository.
-
-## Required validation scenario
-
-The completed client must:
-
-1. Receive initial state and readiness messages.
-2. Advertise water in exchange for food.
-3. Replace that advertisement with one seeking components.
-4. Offer two water for one food.
-5. Observe P02 accepting the offer.
-6. Observe P02 creating a gift.
-7. Accept the gift.
-8. Withdraw the active advertisement.
-9. Intentionally request more inventory capacity than allowed and receive the
-   expected protocol error.
-10. Synchronize and verify final state.
-
-Expected final P01 inventory: **28 water, 31 food, and 31 components**.
-
-Expected report targets: **8 messages sent**, **16 messages received**, status
-`sample exchange completed`, and completion through step 10. These are
-validation targets, not values to hard-code into the client.
-
-## Next task
-
-`feature/websocket-connection` implemented and validated the connection,
-authentication, codec, and readiness handshake (see
-[Client architecture](#client-architecture)); step 1 of the required
-validation scenario passes against the real validator binary.
-
-`feature/domain-model` added `src/planet_charlu/domain/` (see
-[Domain model](#domain-model)): `Bundle`/`Offer`/`Advertisement`/
-`Transaction`/`StationSelf`/`CommandOutcome` value types and a `WorldView`
-snapshot tracker with commitment accounting, all tested against both
-fixtures and a real snapshot from the validator.
-
-`feature/trading-commands` added command builders for
-`advertise`/`offer`/`accept`/`withdraw` in `codec.py`, and `commands.py`'s
-`PendingRequests`/`send_command()` for correlating a sent command with its
-async `result`. Verified manually against a live validator run through all
-ten steps of the documented sample scenario.
-
-`feature/scenario-orchestration` (in progress) has so far added, on top of
-that:
-
-- `commands.py`: `PendingRequests.reject()` and `ProtocolErrorReceived`, so
-  a command answered with a `protocol_error` instead of a `result` (e.g.
-  the required intentional-error validation step) fails its awaiter with an
-  exception instead of hanging forever.
-- `session.py`: `ClientSession`/`open_session()` — a live session whose
-  background pump task keeps `session.world` (a `WorldView`) current from
-  every incoming `state`, resolves or rejects outgoing commands'
-  `PendingRequests` from `result`/`protocol_error` messages, and whose
-  `send()` refuses to send unless the latest `WorldView.is_running()` is
-  true. Verified manually against a live validator through all ten steps of
-  the sample scenario, using `ClientSession` instead of hand-rolled message
-  pumping.
-- `scenario.py`: `run_sample_scenario(session)` drives steps 2-10 on top of
-  an already-open `ClientSession`, following `validator/README.md`'s
-  request IDs and ordering exactly, and raises `ScenarioError` the moment a
-  server response stops matching the documented exercise. `main.py` now
-  wires this into the real client entry point instead of the simpler
-  `session.run()` loop. Verified end-to-end against a live validator run
-  (matching `validation-report.json`'s `"status": "sample exchange
-  completed"`, `"last_completed_step": 10`, and the documented final
-  inventory) and covered by `tests/test_scenario.py` against a scripted
-  fake server.
-
-Still to do on this branch:
-
-1. Retry-with-same-`request_id` and `REQUEST_ID_CONFLICT` handling on top
-   of `PendingRequests`.
-2. A fixture-based test confirming a repeated/duplicate snapshot doesn't
-   double-count a transaction.
-3. A first explainable policy (protect upkeep reserves using
-   `WorldView.available_bundle()`, discover suppliers via advertisements).
-
-Keep connection management, message encoding/decoding, state tracking, and
-scenario orchestration in separate modules rather than implementing everything
-inside `main.py`.
-
-## Git workflow
-
-Run Git commands from the host terminal. At the end of a task:
-
-```bash
-git status
-git add <files>
-git commit -m "Describe the completed change"
-git push -u origin HEAD
-```
-
-Open a pull request into `main`. Do not commit `.venv`, credentials, tokens,
-reports, caches, or editor-specific files.
-
+- There is no automatic reconnect or command retry. A trading command or sync
+  timeout stops the runner to avoid further decisions on uncertain inventory.
+- Validation mode assumes a fresh scripted exercise and cannot resume midway.
+- Public advertisements do not prove peer inventory. The cooperative strategy
+  cannot guarantee survival or acceptance by other clients.
+- The test simulation exercises cooperating peers; it is not a full game server.
+  Validate policy changes in a coordinated run as well.

@@ -1,12 +1,7 @@
-"""Resource bundles: the one arithmetic type everything else is built on.
+"""Nonnegative resource bundles and wire enum conversion.
 
-A bundle is always non-negative in every field, matching the wire schema's
-"Quantities are nonnegative integers" rule. Subtraction is never silently
-allowed to go negative through an operator, because that ambiguity (is this
-a real shortfall, or an estimate that's fine to clamp?) is exactly the kind
-of bug the assignment brief warns about. Callers pick explicitly: ``minus``
-to assert a payment is affordable, ``saturating_subtract`` to estimate what's
-left after competing commitments that the server itself does not reserve.
+Use minus() for affordable payments and saturating_subtract() for estimates
+that may be overcommitted, such as inventory less outstanding offers.
 """
 
 from __future__ import annotations
@@ -83,11 +78,7 @@ class Bundle:
         )
 
     def minus(self, cost: "Bundle") -> "Bundle":
-        """Strict subtraction: raises if ``cost`` is not affordable.
-
-        Use this when the caller already knows (or must verify) the payment
-        is covered, e.g. testing arithmetic invariants.
-        """
+        """Subtract an affordable payment; raise if any resource is short."""
         if not self.covers(cost):
             raise ValueError(f"{cost} exceeds {self}")
         return Bundle(
@@ -97,14 +88,7 @@ class Bundle:
         )
 
     def saturating_subtract(self, cost: "Bundle") -> "Bundle":
-        """Subtract, clamping each resource at zero instead of raising.
-
-        The server does not reserve stock when an offer is posted ("no
-        reservation... multiple offers can promise the same stock"), so a
-        client-side estimate of "what's left after my open offers" can be
-        overcommitted. Clamping at zero represents that honestly instead of
-        crashing on an estimate that was never a hard guarantee.
-        """
+        """Subtract an estimated cost, clamping shortfalls to zero."""
         return Bundle(
             water=max(0, self.water - cost.water),
             food=max(0, self.food - cost.food),
