@@ -4,8 +4,10 @@ A Python 3.11 client for the SpacePort Bazaar trading protocol. It exchanges
 binary Protocol Buffer messages over WebSockets, tracks full server snapshots,
 and supports two modes:
 
-- **Trade** (default): cooperative trading based on inventory, upkeep reserves,
-  incoming offers, and public advertisements.
+- **Trade** (default): self-sufficient trading based on inventory, upkeep
+  reserves, incoming offers, and public advertisements -- trades only for
+  resources this station doesn't produce, pays only in its own specialty,
+  and only accepts favorable-or-equal deals.
 - **Validation**: the fixed ten-step P01/P02 exercise served by the bundled
   Linux validator.
 

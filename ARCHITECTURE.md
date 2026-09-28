@@ -32,7 +32,7 @@ Paths below are relative to `src/planet_charlu/`.
 | `codec.py` | Protobuf encode/decode and builders for ready, sync, and trading commands. |
 | `commands.py` | Request IDs and futures that correlate results/errors with awaiting callers. |
 | `session.py` | Readiness handshake, receive pump, phase gating, snapshot waits, and sync. `run()` is a receive-only diagnostic helper. |
-| `strategy.py` | Cooperative decision policy, attempt accounting, and continuous trading runner. |
+| `strategy.py` | Self-sufficient decision policy, attempt accounting, and continuous trading runner. |
 | `scenario.py` | Fixed validator steps 2–10; step 1 is the session handshake. |
 | `logging_utils.py` | Logging setup and concise server-message summaries. |
 | `domain/resources.py` | Resource enum and nonnegative bundle arithmetic. |
@@ -67,24 +67,44 @@ Paths below are relative to `src/planet_charlu/`.
 
 ## Trading policy
 
-`CooperativeStrategy.choose(world)` returns at most one `Decision`. The runner
-calls `record()` before sending, so even rejected attempts count toward local
-limits. Candidate selection runs in this order:
+`SelfSufficientStrategy.choose(world)` returns at most one `Decision`. The
+runner calls `record()` before sending, so even rejected attempts count
+toward local limits. It only trades for the two resources this station does
+not itself produce, never gives either of them away, and pays only in its
+own specialty (which production replaces). Every trade it proposes or
+accepts must be favorable or equal for us (units in >= units out), which
+converges to 1:1 barter against an equally disciplined partner. Candidate
+selection runs in this order:
 
 1. Withdraw commitments that threaten upkeep reserves.
-2. Accept affordable gifts, useful exchanges, or small help requests without
-   worsening protected reserves.
-3. Publish or refresh surplus/needs advertisements.
-4. Seek reciprocal trades, prioritizing the shortest supply.
-5. Offer small gifts of surplus specialty resources, rotating among partners.
+2. Accept free gifts outright; accept a favorable-or-equal paid trade for a
+   resource we need if the routine budget allows, or unconditionally if it
+   rescues a resource below the three-tick reserve ("critical").
+3. Publish or refresh a specialty-surplus/unproduced-resource-needs
+   advertisement, budget permitting.
+4. Seek reciprocal trades, prioritizing critical resources first, then the
+   shortest supply. A resource with a confirmed supplier (a station that has
+   actually delivered it, per settled `world.transactions`) only trades with
+   that roster; one with no confirmed supplier yet still scans advertisements
+   to find one.
+5. Offer small gifts of surplus specialty, rotating among partners, budget
+   permitting.
 
-The policy protects three ticks of upkeep and targets six, capped by the run's
-remaining duration. Outgoing offers also retain upkeep for their lifetime.
-Production is spendable only after it appears in inventory. Server rules bound
-message size, expiry, outgoing offers, and command counts. Rate-limit results
-postpone further attempts until the retry tick. After each result the runner
-requests a fresh snapshot before deciding again; it does not retry uncertain
-commands automatically.
+The policy protects three ticks of upkeep and targets six, capped by the
+run's remaining duration; a resource below the three-tick reserve is
+"critical" and is recovered at a higher trade cap funded further into
+spendable stock, bypassing the routine-budget gate below. Outgoing offers
+retain upkeep for their lifetime and use a five-tick TTL (capped by the
+run's rules) so a partner has a real window to accept before a re-offer is
+needed. Production is spendable only after it appears in inventory.
+`max_request_records_per_station` is a lifetime budget, not a per-tick one;
+`EMERGENCY_RESERVE` keeps a small floor of it off-limits to routine spending
+once it runs low, so a safety withdrawal, a gift accept, or a critical
+rescue is never the thing that runs out of budget. Server rules bound
+message size, expiry, outgoing offers, and command counts. Rate-limit
+results postpone further attempts until the retry tick. After each result
+the runner requests a fresh snapshot before deciding again; it does not
+retry uncertain commands automatically.
 
 Change policy thresholds and selection in `strategy.py`; change connection
 behavior in `connection.py` or `session.py`. Keep validator-specific IDs and
