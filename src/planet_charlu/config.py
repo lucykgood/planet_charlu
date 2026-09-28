@@ -90,7 +90,7 @@ def _build_parser(env: Mapping[str, str]) -> argparse.ArgumentParser:
         help="Station ID to select from the credentials file (env: BAZAAR_STATION_ID)",
     )
     parser.add_argument("--mode", choices=("trade", "validation"), default="trade",
-                        help="Continuous cooperative trading (default) or the validator exercise")
+                        help="Continuous self-sufficient trading (default) or the validator exercise")
     return parser
 
 

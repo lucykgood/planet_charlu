@@ -1,4 +1,4 @@
-"""Cooperative trading from public advertisements and our private inventory.
+"""Self-sufficient trading from public advertisements and our private inventory.
 
 Advertisements are claims, not access to other planets' inventories. No strategy
 can guarantee their survival or force another team's client to accept an offer.
@@ -43,11 +43,27 @@ class Decision:
         return getattr(self.message, self.message.WhichOneof("message")).request_id
 
 
-class CooperativeStrategy:
-    """Small, bounded trades; three ticks protected, six ticks desired.
+class SelfSufficientStrategy:
+    """Trade only for the two resources we do not produce; never give away
+    either of them; pay only in our specialty, which production replaces.
 
-    Production is deliberately not counted as spendable until it arrives.
-    Outstanding offers also reserve their payment and upkeep until expiration.
+    Every trade this station proposes or accepts must be favorable or equal
+    for us: at least as many units come in as our specialty units pay out.
+    Against an equally disciplined partner that converges to exact 1:1
+    barter, which is the default this strategy itself proposes.
+
+    A roster of confirmed suppliers -- station_id -> the resource(s) it has
+    actually delivered, learned from settled ``world.transactions`` rather
+    than from advertisements (a claim, not proof of stock) -- is preferred
+    over blind advertisement-scanning once at least one supplier is
+    confirmed for a resource. Advertisements remain the only discovery
+    mechanism for a resource with no confirmed supplier yet.
+
+    Free gifts of anything are always accepted regardless of roster or
+    resource. If our own specialty ever falls below the three-tick reserve
+    (production can fall short of its own upkeep), that is a survival
+    exception: we seek and accept trades for it too, funded from whichever
+    other resource we can spare, exactly like any other critical resource.
     """
     def __init__(self) -> None:
         self.tick = -1
@@ -57,8 +73,35 @@ class CooperativeStrategy:
         self.retry_tick = 0
         self.partner_turn: dict[str, int] = {}
         self.last_ad_tick = -100
+        self.known_suppliers: dict[str, set[Resource]] = {}
+        self.seen_transactions: set[str] = set()
+
+    def _learn_suppliers(self, world: WorldView) -> None:
+        """Record which resource each partner actually delivered.
+
+        Built from settled transactions -- proof stock moved -- not from
+        advertisements, which only claim it.
+        """
+        for tx in world.transactions:
+            if tx.transaction_id in self.seen_transactions:
+                continue
+            self.seen_transactions.add(tx.transaction_id)
+            if tx.proposer_id == world.self_station_id:
+                other, delivered_to_us = tx.recipient_id, tx.receive
+            elif tx.recipient_id == world.self_station_id:
+                other, delivered_to_us = tx.proposer_id, tx.give
+            else:
+                continue
+            delivered = frozenset(r for r in RESOURCES if quantity(delivered_to_us, r) > 0)
+            if delivered:
+                self.known_suppliers.setdefault(other, set()).update(delivered)
+
+    def confirmed_suppliers_of(self, resource: Resource) -> frozenset[str]:
+        return frozenset(station_id for station_id, resources in self.known_suppliers.items()
+                          if resource in resources)
 
     def choose(self, world: WorldView) -> Decision | None:
+        self._learn_suppliers(world)
         if world.tick != self.tick:
             self.tick = world.tick
             self.attempted.clear()
@@ -81,7 +124,9 @@ class CooperativeStrategy:
         available = world.self.inventory.saturating_subtract(committed)
         surplus = available.saturating_subtract(reserve)
         needs = target.saturating_subtract(available)
+        critical = frozenset(r for r in RESOURCES if quantity(available, r) < quantity(reserve, r))
         specialty = world.self.specialty
+        not_produced = frozenset(RESOURCES) - {specialty}
         common = dict(run_id=world.run_id, request_id=generate_request_id())
 
         def decision(key, reason, message):
@@ -98,27 +143,50 @@ class CooperativeStrategy:
                     return result
             return None
 
+        # Routine seeking is only the two resources we don't produce. Our
+        # specialty joins only as a survival exception, if it has itself
+        # fallen below the reserve.
+        seeking = frozenset(r for r in not_produced if quantity(needs, r) > 0)
+        if specialty in critical:
+            seeking = seeking | {specialty}
+
         # Incoming give/receive are from the OTHER planet's perspective.
-        incoming = sorted(world.open_offers_to_me(), key=lambda o: (not o.is_gift(), o.created_tick, o.offer_id))
+        def rescues_critical(offer):
+            return any(r in critical and quantity(offer.give, r) > quantity(offer.receive, r) for r in RESOURCES)
+
+        incoming = sorted(world.open_offers_to_me(),
+                          key=lambda o: (not rescues_critical(o), not o.is_gift(), o.created_tick, o.offer_id))
         for offer in incoming:
             if offer.is_expired_by(world.tick) or not available.covers(offer.receive):
                 continue
             after = available.minus(offer.receive) + offer.give
             safe = all(quantity(after, r) >= min(quantity(available, r), quantity(reserve, r)) for r in RESOURCES)
-            useful = any(quantity(needs, r) > 0 and quantity(offer.give, r) > quantity(offer.receive, r) for r in RESOURCES)
-            # Also fulfill small help requests paid only from surplus specialty.
-            help_cost = quantity(offer.receive, specialty)
-            helping = (offer.give.is_zero() and 0 < help_cost <= 2
-                       and offer.receive == bundle_of(specialty, help_cost)
-                       and surplus.covers(offer.receive))
-            if safe and (offer.is_gift() or useful or helping):
-                result = decision('accept:' + offer.offer_id, 'accept safe gift, useful exchange, or help request',
+            if not safe:
+                continue
+            if offer.is_gift():
+                result = decision('accept:' + offer.offer_id, 'accept free gift',
+                                  codec.build_accept(**common, offer_id=offer.offer_id))
+                if result:
+                    return result
+                continue
+            # Never pay in a resource we don't produce -- only our specialty
+            # may fund a paid trade (the emergency exception above still
+            # applies: if specialty itself is critical, this only relaxes
+            # what we may *seek*, not what a partner may charge us).
+            pays_only_specialty = all(r == specialty or quantity(offer.receive, r) == 0 for r in RESOURCES)
+            units_in = sum(quantity(offer.give, r) for r in RESOURCES)
+            units_out = sum(quantity(offer.receive, r) for r in RESOURCES)
+            favorable_or_equal = units_in >= units_out
+            nets_needed = any(r in seeking and quantity(offer.give, r) > quantity(offer.receive, r) for r in RESOURCES)
+            if pays_only_specialty and favorable_or_equal and nets_needed:
+                result = decision('accept:' + offer.offer_id, 'accept favorable-or-equal trade for a resource we need',
                                   codec.build_accept(**common, offer_id=offer.offer_id))
                 if result:
                     return result
 
-        selling = frozenset(r for r in RESOURCES if quantity(surplus, r) > 0)
-        seeking = frozenset(r for r in RESOURCES if quantity(needs, r) > 0)
+        # We only ever advertise our specialty as surplus; the other two are
+        # never for sale, no matter how much of them we happen to be holding.
+        selling = frozenset({specialty}) if quantity(surplus, specialty) > 0 else frozenset()
         own_ads = [a for a in world.advertisements if a.posted_by(world.self_station_id)
                    and a.is_active() and not a.is_expired_by(world.tick)]
         ad = own_ads[0] if own_ads else None
@@ -127,7 +195,7 @@ class CooperativeStrategy:
         if (selling or seeking) and (refresh or (changed and world.tick >= self.last_ad_tick + 3)):
             ttl = min(10, rules.max_publication_ttl_ticks, remaining)
             if ttl > 0:
-                result = decision('advertise', 'publish surplus and supply needs', codec.build_advertise(
+                result = decision('advertise', 'publish specialty surplus and unproduced-resource needs', codec.build_advertise(
                     **common, selling=sorted(selling, key=lambda r: r.value),
                     seeking=sorted(seeking, key=lambda r: r.value), expires_tick=world.tick + ttl))
                 if result:
@@ -145,19 +213,35 @@ class CooperativeStrategy:
                and a.station_id not in busy and a.is_active() and not a.is_expired_by(world.tick)
                and (not world.directory or a.station_id in world.directory)]
         ads.sort(key=lambda a: (self.partner_turn.get(a.station_id, -1), a.station_id))
-        # First seek reciprocal exchanges, prioritizing the shortest supply.
-        wanted = sorted(seeking, key=lambda r: quantity(available, r) / max(1, quantity(world.self.upkeep_per_tick, r)))
-        for ad in ads:
-            for need in wanted:
-                if need not in ad.selling:
-                    continue
-                payments = sorted(ad.seeking - {need}, key=lambda r: (r != specialty, r.value))
-                for payment in payments:
-                    amount = min(3, quantity(spendable, payment), quantity(needs, need))
+        # Prioritize critical resources (below the 3-tick reserve) ahead of
+        # everything else, then the shortest supply.
+        wanted = sorted(seeking, key=lambda r: (r not in critical,
+                         quantity(available, r) / max(1, quantity(world.self.upkeep_per_tick, r))))
+        for need in wanted:
+            # An ad is only a claim; once a partner has actually delivered
+            # this resource, stop trusting anyone else's unconfirmed claim.
+            confirmed = self.confirmed_suppliers_of(need)
+            pool = [a for a in ads if need in a.selling and (not confirmed or a.station_id in confirmed)]
+            if need == specialty:
+                # Emergency only: can't fund buying specialty with itself,
+                # so pay from whichever other resource we can spare.
+                payment_options = tuple(sorted(not_produced, key=lambda r: r.value))
+            else:
+                payment_options = (specialty,)
+            pay_pool = surplus if need in critical else spendable
+            cap = 6 if need in critical else 3
+            for candidate_ad in pool:
+                for payment in payment_options:
+                    if payment not in candidate_ad.seeking:
+                        continue
+                    amount = min(cap, quantity(pay_pool, payment), quantity(needs, need))
                     if amount <= 0:
                         continue
-                    result = decision('partner:' + ad.station_id, f'trade {payment.value} for needed {need.value} with {ad.station_id}',
-                        codec.build_offer(**common, recipient_id=ad.station_id,
+                    reason = f'trade {payment.value} for needed {need.value} with {candidate_ad.station_id}'
+                    if candidate_ad.station_id in confirmed:
+                        reason += ' (confirmed supplier)'
+                    result = decision('partner:' + candidate_ad.station_id, reason,
+                        codec.build_offer(**common, recipient_id=candidate_ad.station_id,
                             give=bundle_of(payment, amount), receive=bundle_of(need, amount),
                             expires_tick=world.tick + ttl))
                     if result:
@@ -185,9 +269,9 @@ class CooperativeStrategy:
 
 
 async def run_trading(session: ClientSession) -> WorldView:
-    strategy = CooperativeStrategy()
+    strategy = SelfSufficientStrategy()
     strategy.sent_total = len(session.world.request_results)
-    logger.info('cooperative trading started: station=%s specialty=%s',
+    logger.info('self-sufficient trading started: station=%s specialty=%s',
                 session.world.self_station_id, session.world.self.specialty.value)
     while True:
         world = session.world

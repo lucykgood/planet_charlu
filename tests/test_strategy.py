@@ -5,7 +5,7 @@ import pytest
 import websockets
 
 from fixtures import (make_state, make_self_observation, make_bundle, make_offer,
-                      make_advertisement, make_readiness, make_result)
+                      make_advertisement, make_transaction, make_readiness, make_result)
 from planet_charlu import codec
 from planet_charlu.config import ClientConfig, load_config
 from planet_charlu.connection import BazaarConnection, REQUIRED_SUBPROTOCOL
@@ -13,11 +13,12 @@ from planet_charlu.domain.resources import Bundle
 from planet_charlu.domain.world import WorldView
 from planet_charlu.generated import bazaar_pb2 as pb
 from planet_charlu.session import open_session, ClientSession
-from planet_charlu.strategy import CooperativeStrategy, run_trading
+from planet_charlu.strategy import SelfSufficientStrategy, run_trading
 
 
-def world(inventory=(30, 2, 5), offers=(), ads=(), specialty=pb.RESOURCE_WATER, tick=0):
+def world(inventory=(30, 2, 5), offers=(), ads=(), transactions=(), specialty=pb.RESOURCE_WATER, tick=0):
     state = make_state(tick=tick, offers=list(offers), advertisements=list(ads),
+        transactions=list(transactions),
         self_observation=make_self_observation(inventory=make_bundle(*inventory), specialty=specialty))
     state.rules.max_request_records_per_station = 1000
     return WorldView.from_state(state)
@@ -36,7 +37,7 @@ def test_runtime_modes():
 
 def test_advertisement_uses_assigned_specialty_and_shortages():
     w = world(inventory=(1, 30, 2), specialty=pb.RESOURCE_FOOD)
-    action = CooperativeStrategy().choose(w)
+    action = SelfSufficientStrategy().choose(w)
     body = action.message.advertise.body
     assert list(body.selling.items) == [pb.RESOURCE_FOOD]
     assert set(body.seeking.items) == {pb.RESOURCE_WATER, pb.RESOURCE_COMPONENTS}
@@ -44,55 +45,157 @@ def test_advertisement_uses_assigned_specialty_and_shortages():
 
 
 def test_trade_for_shortage_with_arbitrary_partner():
+    # Default inventory's food=2 is below the 3-tick reserve (critical), so
+    # this also exercises the escalated recovery cap (6, funded from surplus)
+    # rather than the routine cap (3, funded from spendable).
     w = world(ads=[make_advertisement(station_id='TEAM-Z')])
-    strategy = CooperativeStrategy()
+    strategy = SelfSufficientStrategy()
     skip_ad(strategy, w)
     body = strategy.choose(w).message.offer.body
     assert body.recipient_id == 'TEAM-Z'
-    assert Bundle.from_wire(body.give) == Bundle(water=3)
-    assert Bundle.from_wire(body.receive) == Bundle(food=3)
+    assert Bundle.from_wire(body.give) == Bundle(water=4)
+    assert Bundle.from_wire(body.receive) == Bundle(food=4)
     assert body.expires_tick == 2
+
+
+def test_critical_recovery_dips_into_offer_lifetime_buffer():
+    # Same commitment as the offer-lifetime-buffer test below, but with the
+    # default food=2 (critical). A routine trade would be blocked here
+    # because spendable.water == 0 (all 5 available water is reserved for
+    # the offer's own upkeep lifetime) -- but recovering a critical resource
+    # is funded from surplus instead, which only protects the 3-tick
+    # reserve, so the trade goes through anyway.
+    outgoing = make_offer(recipient_id='P02', give=make_bundle(25), receive=make_bundle(0, 1))
+    w = world(offers=[outgoing], ads=[make_advertisement(station_id='P03')])
+    strategy = SelfSufficientStrategy()
+    skip_ad(strategy, w)
+    action = strategy.choose(w)
+    assert action is not None and action.message.WhichOneof('message') == 'offer'
+    body = action.message.offer.body
+    assert body.recipient_id == 'P03'
+    assert Bundle.from_wire(body.give) == Bundle(water=2)
+    assert Bundle.from_wire(body.receive) == Bundle(food=2)
 
 
 def test_accept_direction_and_reserve_protection():
     good = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(0, 2), receive=make_bundle(2))
-    action = CooperativeStrategy().choose(world(offers=[good]))
+    action = SelfSufficientStrategy().choose(world(offers=[good]))
     assert action.message.accept.body.offer_id == good.offer_id
     expensive = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(0, 2), receive=make_bundle(29))
-    assert CooperativeStrategy().choose(world(offers=[expensive])).message.WhichOneof('message') != 'accept'
+    assert SelfSufficientStrategy().choose(world(offers=[expensive])).message.WhichOneof('message') != 'accept'
 
 
 def test_incoming_gift_accepted_even_with_shortage():
     gift = make_offer(proposer_id='P09', recipient_id='P01', receive=make_bundle())
-    assert CooperativeStrategy().choose(world(inventory=(0, 0, 0), offers=[gift])).message.WhichOneof('message') == 'accept'
+    assert SelfSufficientStrategy().choose(world(inventory=(0, 0, 0), offers=[gift])).message.WhichOneof('message') == 'accept'
 
 
-def test_small_help_request_paid_from_specialty_surplus():
-    help_offer = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(), receive=make_bundle(2))
-    assert CooperativeStrategy().choose(world(offers=[help_offer])).message.WhichOneof('message') == 'accept'
-    assert CooperativeStrategy().choose(world(inventory=(3, 3, 3), offers=[help_offer])).message.WhichOneof('message') != 'accept'
+def test_free_gift_of_unproduced_resource_always_accepted():
+    # A gift costs nothing, regardless of resource type or whether the giver
+    # is a known/confirmed supplier -- refusing free stock of something we
+    # can't produce ourselves would be pure self-sabotage.
+    gift = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(0, 0, 4), receive=make_bundle())
+    assert SelfSufficientStrategy().choose(world(offers=[gift])).message.WhichOneof('message') == 'accept'
+
+
+def test_worse_than_equal_trade_rejected():
+    # 2 food for 3 water is affordable and would even count as "useful" by
+    # resource type, but it is strictly worse than 1:1 for us -- refused.
+    worse = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(0, 2), receive=make_bundle(3))
+    assert SelfSufficientStrategy().choose(world(offers=[worse])).message.WhichOneof('message') != 'accept'
+
+
+def test_unfavorable_help_request_no_longer_fulfilled():
+    # A small charity ask -- they give us nothing, but want 2 of our
+    # specialty in return -- is a request to give away more than we get.
+    # The "favorable or equal only" rule refuses it even though it's a tiny,
+    # affordable amount.
+    ask = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(), receive=make_bundle(2))
+    assert SelfSufficientStrategy().choose(world(offers=[ask])).message.WhichOneof('message') != 'accept'
+
+
+def test_incoming_trade_rejected_if_it_would_cost_an_unproduced_resource():
+    # Plenty of components for a little food looks favorable by the
+    # numbers, but it asks us to pay in food -- one of the two resources we
+    # rely on trade for ourselves. Refused regardless of how good the ratio is.
+    offer = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(0, 0, 5), receive=make_bundle(0, 1))
+    assert SelfSufficientStrategy().choose(world(offers=[offer])).message.WhichOneof('message') != 'accept'
 
 
 def test_unaffordable_exchange_not_funded_by_promised_receipts():
     offer = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(100, 2), receive=make_bundle(31))
-    assert CooperativeStrategy().choose(world(offers=[offer])).message.WhichOneof('message') != 'accept'
+    assert SelfSufficientStrategy().choose(world(offers=[offer])).message.WhichOneof('message') != 'accept'
 
 
 def test_commitments_prevent_double_spending_and_unsafe_offers_withdrawn():
     outgoing = make_offer(give=make_bundle(28), receive=make_bundle(0, 1))
-    action = CooperativeStrategy().choose(world(offers=[outgoing]))
+    action = SelfSufficientStrategy().choose(world(offers=[outgoing]))
     assert action.message.withdraw.body.object_id == outgoing.offer_id
     outgoing.give.water = 25
-    w = world(offers=[outgoing], ads=[make_advertisement(station_id='P03')])
-    strategy = CooperativeStrategy()
+    # food=4 keeps food out of the critical zone (>= the 3-tick reserve of
+    # 3), isolating the offer-lifetime spendable buffer from the
+    # critical-recovery override tested above.
+    w = world(inventory=(30, 4, 5), offers=[outgoing], ads=[make_advertisement(station_id='P03')])
+    strategy = SelfSufficientStrategy()
     skip_ad(strategy, w)
     assert strategy.choose(w) is None  # remaining water needed across offer lifetime
+
+
+def test_never_offers_to_pay_with_unproduced_resource():
+    # Huge food surplus, and an ad that wants exactly it -- but that ad is
+    # seeking food paid for with food, not our specialty (water). We only
+    # ever pay with our specialty, so no match forms even though we could
+    # easily afford the trade.
+    w = world(inventory=(30, 100, 5),
+              ads=[make_advertisement(station_id='P03', selling=[pb.RESOURCE_COMPONENTS], seeking=[pb.RESOURCE_FOOD])])
+    strategy = SelfSufficientStrategy()
+    skip_ad(strategy, w)
+    assert strategy.choose(w) is None
+
+
+def test_specialty_shortfall_funds_recovery_from_other_resources():
+    # Water is both our specialty and, at inventory=1, below the 3-tick
+    # reserve -- a production shortfall, not a routine need. The
+    # self-sufficiency rule lifts as a survival exception: seek water too,
+    # but fund it from food (never from water itself -- that would be
+    # buying water with water, a net no-op).
+    w = world(inventory=(1, 30, 30),
+              ads=[make_advertisement(station_id='P03', selling=[pb.RESOURCE_WATER], seeking=[pb.RESOURCE_FOOD])])
+    strategy = SelfSufficientStrategy()
+    skip_ad(strategy, w)
+    action = strategy.choose(w)
+    assert action.message.WhichOneof('message') == 'offer'
+    body = action.message.offer.body
+    assert body.recipient_id == 'P03'
+    assert Bundle.from_wire(body.give) == Bundle(food=5)
+    assert Bundle.from_wire(body.receive) == Bundle(water=5)
+
+
+def test_confirmed_supplier_gates_unconfirmed_ads_once_learned():
+    ads = [make_advertisement(station_id='P02', selling=[pb.RESOURCE_FOOD], seeking=[pb.RESOURCE_WATER]),
+           make_advertisement(station_id='P05', selling=[pb.RESOURCE_FOOD], seeking=[pb.RESOURCE_WATER])]
+    # Before any confirmed supplier, either currently-advertising station is
+    # a valid candidate -- an ad is all we have to go on yet. P02 sorts
+    # first alphabetically (no partner history yet either), so it wins.
+    w = world(ads=ads)
+    strategy = SelfSufficientStrategy()
+    skip_ad(strategy, w)
+    assert strategy.choose(w).message.offer.body.recipient_id == 'P02'
+
+    # Once P05 has actually delivered food (a settled transaction -- proof,
+    # not a claim), P02's equally active ad is no longer trusted for food.
+    tx = make_transaction(transaction_id='tx-1', proposer_id='P05', recipient_id='P01',
+                          give=make_bundle(0, 3), receive=make_bundle(0, 0, 1))
+    w2 = world(ads=ads, transactions=[tx])
+    strategy2 = SelfSufficientStrategy()
+    skip_ad(strategy2, w2)
+    assert strategy2.choose(w2).message.offer.body.recipient_id == 'P05'
 
 
 def test_expired_offers_and_advertisements_ignored():
     gift = make_offer(proposer_id='P09', recipient_id='P01', receive=make_bundle(), expires_tick=1)
     w = world(tick=1, offers=[gift], ads=[make_advertisement(expires_tick=1)])
-    strategy = CooperativeStrategy()
+    strategy = SelfSufficientStrategy()
     skip_ad(strategy, w)
     assert strategy.choose(w) is None
 
@@ -100,13 +203,15 @@ def test_expired_offers_and_advertisements_ignored():
 def test_gifts_rotate_across_all_eight_partners():
     ads = [make_advertisement(station_id=f'P{i:02}', selling=[], expires_tick=100) for i in range(2, 10)]
     w = world(inventory=(100, 30, 30), ads=ads)
-    strategy = CooperativeStrategy()
+    strategy = SelfSufficientStrategy()
     skip_ad(strategy, w)
     recipients = []
     for tick in range(8):
         snapshot = replace(w, tick=tick)
         # Keep one matching active ad so this test isolates partner selection.
-        own = make_advertisement(station_id='P01', selling=[1, 2, 3], seeking=[], expires_tick=30)
+        # (selling=[WATER] only, seeking=[] -- matching what this strategy
+        # actually advertises: specialty surplus, no unmet needs here.)
+        own = make_advertisement(station_id='P01', selling=[pb.RESOURCE_WATER], seeking=[], expires_tick=30)
         from planet_charlu.domain.advertisements import Advertisement
         snapshot = replace(snapshot, advertisements=w.advertisements + (Advertisement.from_wire(own),))
         action = strategy.choose(snapshot)
@@ -120,23 +225,23 @@ def test_gifts_rotate_across_all_eight_partners():
 
 @pytest.mark.parametrize('phase', [pb.PHASE_READY, pb.PHASE_PAUSED, pb.PHASE_FINISHED, pb.PHASE_ABORTED])
 def test_no_commands_outside_running(phase):
-    assert CooperativeStrategy().choose(replace(world(), phase=phase)) is None
+    assert SelfSufficientStrategy().choose(replace(world(), phase=phase)) is None
 
 
 def test_rate_capacity_and_message_size_limits():
     w = world(ads=[make_advertisement()])
     w = replace(w, rules=replace(w.rules, new_commands_per_station_per_tick=1))
-    strategy = CooperativeStrategy()
+    strategy = SelfSufficientStrategy()
     skip_ad(strategy, w)
     assert strategy.choose(w) is None
     assert strategy.choose(replace(w, tick=1)) is not None
-    assert CooperativeStrategy().choose(replace(w, rules=replace(w.rules, max_command_bytes=1))) is None
-    assert CooperativeStrategy().choose(replace(w, rules=replace(w.rules, max_request_records_per_station=0))) is None
+    assert SelfSufficientStrategy().choose(replace(w, rules=replace(w.rules, max_command_bytes=1))) is None
+    assert SelfSufficientStrategy().choose(replace(w, rules=replace(w.rules, max_request_records_per_station=0))) is None
 
 
 def test_short_ttl_open_offer_limit_and_failed_station():
     w = world(ads=[make_advertisement()])
-    strategy = CooperativeStrategy()
+    strategy = SelfSufficientStrategy()
     skip_ad(strategy, w)
     assert strategy.choose(replace(w, rules=replace(w.rules, max_open_outgoing_offers=0))) is None
     action = strategy.choose(replace(w, rules=replace(w.rules, max_offer_ttl_ticks=1)))
