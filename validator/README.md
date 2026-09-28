@@ -4,8 +4,8 @@ Practice with two planets: your client controls **P01** and the server controls
 **P02**. You will advertise resources, exchange water for food, accept a gift,
 and handle an intentional error.
 
-The folder contains two Linux server binaries, the message definitions in
-[bazaar.proto](bazaar.proto), and this guide. Running the server requires no
+This folder contains two Linux server binaries and this guide. The message
+definitions are in [bazaar.proto](../protos/bazaar.proto). Running the server requires no
 Rust installation or game repository.
 
 ## Recommended: develop in a container

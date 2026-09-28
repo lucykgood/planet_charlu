@@ -6,7 +6,7 @@ import logging
 from planet_charlu.config import ClientConfig, ConfigError, load_config
 from planet_charlu.connection import BazaarConnection
 from planet_charlu.logging_utils import configure_logging
-from planet_charlu.scenario import ScenarioError, run_sample_scenario
+from planet_charlu.scenario import run_sample_scenario
 from planet_charlu.session import open_session
 from planet_charlu.strategy import run_trading
 

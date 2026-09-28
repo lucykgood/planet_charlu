@@ -1,11 +1,4 @@
-"""StationSelf: this planet's own observed state.
-
-Wraps ``bazaar_pb2.StationObservation``, keeping only the fields the
-reserve-protection and survival-monitoring logic actually needs (per the
-assignment brief's testing areas: protecting upkeep and detecting
-shortages/failure). Fields not read anywhere yet are left off rather than
-copied speculatively; add them when a real caller needs them.
-"""
+"""Our station's inventory, upkeep, and survival observations from a snapshot."""
 
 from __future__ import annotations
 

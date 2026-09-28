@@ -1,9 +1,6 @@
-"""Advertisement domain type: a claim about what a planet sells or seeks.
+"""Public claims about resources a station sells or seeks.
 
-An advertisement proves nothing about actual stock or need ("the server
-authenticates the claimant but does not verify the claimed stock or need")
--- it is a signal, not a fact about inventory. Keeping it a distinct type
-from ``StationSelf``/``Bundle`` makes that distinction impossible to blur.
+Advertisements do not prove inventory; the strategy uses them to find partners.
 """
 
 from __future__ import annotations
@@ -63,7 +60,7 @@ class Advertisement:
         return tick >= self.expires_tick
 
     def is_help_request(self) -> bool:
-        """Empty selling plus nonempty seeking is a help request, per the brief."""
+        """Empty selling plus nonempty seeking indicates a help request."""
         return not self.selling and bool(self.seeking)
 
     def posted_by(self, station_id: str) -> bool:

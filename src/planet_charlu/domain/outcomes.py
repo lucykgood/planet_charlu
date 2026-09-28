@@ -1,9 +1,6 @@
-"""CommandOutcome: the result of one previously-sent command.
+"""Command results with nullable wire fields unwrapped.
 
-A thin wrapper, not a rewrite -- ``code`` stays the raw wire ``ResultCode``
-int rather than a duplicated Python enum, since callers naturally compare it
-against ``bazaar_pb2.RESULT_CODE_*`` constants and a second parallel enum
-would just be another thing to keep in sync with the .proto file.
+Result codes remain wire enum values for comparison with bazaar_pb2 constants.
 """
 
 from __future__ import annotations
