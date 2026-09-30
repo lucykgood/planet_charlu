@@ -66,3 +66,27 @@ def test_proposed_by_and_directed_to():
     assert not offer.proposed_by("P02")
     assert offer.directed_to("P02")
     assert not offer.directed_to("P01")
+
+
+def test_relative_to_as_proposer_keeps_give_and_receive():
+    offer = Offer.from_wire(make_offer(
+        proposer_id="P01", recipient_id="P02", give=make_bundle(2), receive=make_bundle(0, 1),
+    ))
+
+    other, we_give, we_receive = offer.relative_to("P01")
+
+    assert other == "P02"
+    assert we_give == Bundle(water=2)
+    assert we_receive == Bundle(food=1)
+
+
+def test_relative_to_as_recipient_swaps_give_and_receive():
+    offer = Offer.from_wire(make_offer(
+        proposer_id="P01", recipient_id="P02", give=make_bundle(2), receive=make_bundle(0, 1),
+    ))
+
+    other, we_give, we_receive = offer.relative_to("P02")
+
+    assert other == "P01"
+    assert we_give == Bundle(food=1)
+    assert we_receive == Bundle(water=2)

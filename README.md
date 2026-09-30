@@ -82,6 +82,10 @@ The validator writes `validation-credentials.json`; the client reads P01's token
 from it unless a CLI or environment token overrides it. Clear `BAZAAR_TOKEN`
 when switching from a live server to validator credentials.
 
+This also logs the same human-readable status dashboard described above,
+once after each of the ten steps -- a good way to confirm the logging itself
+works without needing a live match.
+
 A completed exchange leaves inventory at **28 water, 31 food, 31 components**.
 Check `validation-report.json` for `status: "sample exchange completed"` and
 `last_completed_step: 10`. With no extra syncs or retries, the client sends
@@ -118,6 +122,66 @@ The strategy waits for a running phase, protects upkeep resources, and logs the
 reason for each action. It stops when the run finishes or aborts, the station
 fails, or the connection fails. Stop manually with Ctrl+C.
 
+In trade mode, every tick also logs a human-readable status block -- no flag
+needed -- so the run stays interpretable without cross-referencing raw offer
+IDs:
+
+```text
+----------------------------------------------------------------------
+tick 5 | running | station=P01 specialty=water health=100
+reserves: water=30 (reserve 3, ok) | food=2 (reserve 3, CRITICAL) | components=5 (reserve 3, ok)
+pending actions: none
+open offers to us (2):
+  <- offer from P02: we'd give 4 water, we'd receive 4 food (expires tick 10)
+  <- offer from P05: we'd give 3 water, we'd receive 1 food (expires tick 10)
+recent trades: none yet
+passed on 1 incoming offer(s):
+  x offer from P05: we'd give 3 water, we'd receive 1 food -- unfavorable: would give more than we receive
+trading: accept favorable-or-equal trade for a resource we need (offer good)
+  -> ok
+```
+
+Every incoming offer gets weighed, not just the one accepted: the dashboard
+lists what's on the board, a "passed on ..." line explains why anything else
+was turned down (unfavorable terms, insufficient stock, a breached reserve,
+an exhausted budget), and the action line shows the exact terms sent and, on
+success, the object/transaction ID the server actually created -- so a
+decision can be reconstructed after the fact without cross-referencing the
+JSON log.
+
+Every run also writes a structured JSON Lines record (for machine reading, not
+for you to read directly) to an auto-named file under `runs/`, and renders it
+into an interactive HTML dashboard next to it -- **live**: open it while the
+run is still going and it keeps itself current, reloading every few seconds
+for as long as the run is in progress, then settles once the run ends
+(cleanly or not). It has two tabs: **Overview** (inventory/health over time,
+decisions and command outcomes, settled trades) and **Timeline**, a single
+chronological, filterable feed merging completed trades, rejected requests
+(our commands the server turned down, and incoming offers we declined),
+shortage periods (unmet upkeep grouped into spans, not one row per tick), and
+suspected disconnected/stalled periods (a gap between log events far longer
+than the run's own pace) -- so what actually happened during a run is visible
+without reading the raw log line by line:
+
+```
+runs/P01-20260930T091500.jsonl
+runs/P01-20260930T091500-summary.html   <- open this any time, including mid-run
+```
+
+Look for `HTML run summary written to ...` in the console output for the exact
+path. The dashboard also opens itself in your default browser the first time
+it's written, so a local run needs no extra step to watch live; pass
+`--no-open-browser` to turn that off (e.g. inside Docker, where there is no
+browser to open). Pass `--run-log <path>` to name it yourself instead of the
+auto-generated one; regenerate the HTML anytime by hand with:
+
+```bash
+python scripts/generate_run_summary.py <path>
+```
+
+See [docs/task7-structured-log-proposal.md](docs/task7-structured-log-proposal.md)
+for the log's event schema and design rationale.
+
 ### Configuration
 
 CLI flags take precedence over environment variables, then defaults. If no
@@ -131,6 +195,9 @@ the credentials file's `players` list.
 | Credentials file | `--credentials-file` | `BAZAAR_CREDENTIALS_FILE` | `validation-credentials.json` |
 | Station | `--station-id` | `BAZAAR_STATION_ID` | `P01` |
 | Mode | `--mode` | None | `trade` |
+| Structured run log | `--run-log` | `BAZAAR_RUN_LOG` | auto-named file under `runs/` |
+| Open HTML summary in a browser on first write | `--no-open-browser` (to disable) | None | on |
+| Verbose (raw protocol log lines) | `--verbose` / `-v` | None | off |
 
 There is no automatic `.env` loader. Keep tokens and validator output local;
 the default credential/report filenames are ignored by Git. Configuration

@@ -16,7 +16,9 @@ from planet_charlu.domain.offers import OfferStatus
 from planet_charlu.domain.resources import Bundle, Resource
 from planet_charlu.domain.world import WorldView
 from planet_charlu.generated import bazaar_pb2
+from planet_charlu.logging_utils import format_status_report
 from planet_charlu.session import ClientSession
+from planet_charlu.structured_log import RunLog
 
 logger = logging.getLogger(__name__)
 
@@ -35,128 +37,175 @@ def _require(condition: bool, message: str) -> None:
         raise ScenarioError(message)
 
 
-async def run_sample_scenario(session: ClientSession) -> WorldView:
+async def run_sample_scenario(session: ClientSession, run_log: RunLog | None = None) -> WorldView:
     """Run steps 2-10 of the guided exercise and return the final ``WorldView``."""
     run_id = session.world.run_id
+    logger.info("%s", format_status_report(session.world))
+    if run_log:
+        run_log.run_started(session.world, mode="validation")
 
-    # Step 2: advertise water for food.
-    outcome = await session.send(
-        request_id="student-advertise-1",
-        message=codec.build_advertise(
+    def snapshot(world: WorldView) -> None:
+        if run_log:
+            run_log.tick_snapshot(world, sent_total=len(world.request_results))
+            run_log.transactions_settled(world)
+            run_log.offers_snapshot(world)
+            run_log.refresh_html()
+
+    try:
+        # Step 2: advertise water for food.
+        step2_message = codec.build_advertise(
             run_id=run_id,
             request_id="student-advertise-1",
             selling=[Resource.WATER],
             seeking=[Resource.FOOD],
             expires_tick=6,
-        ),
-    )
-    _require(outcome.ok, "step 2: advertise water for food was rejected")
-    await session.wait_for(lambda world: world.world_version >= 3)
-    logger.info("scenario step 2/10 done: advertised water for food")
+        )
+        if run_log:
+            run_log.decision(session.world, key="step2", reason="advertise water for food",
+                              request_id="student-advertise-1", message=step2_message)
+        outcome = await session.send(request_id="student-advertise-1", message=step2_message)
+        if run_log:
+            run_log.command_result(session.world, key="step2", outcome=outcome)
+        _require(outcome.ok, "step 2: advertise water for food was rejected")
+        await session.wait_for(lambda world: world.world_version >= 3)
+        logger.info("scenario step 2/10 done: advertised water for food")
+        logger.info("%s", format_status_report(session.world))
+        snapshot(session.world)
 
-    # Step 3: replace the advertisement with a request for components.
-    outcome = await session.send(
-        request_id="student-advertise-seeking-1",
-        message=codec.build_advertise(
+        # Step 3: replace the advertisement with a request for components.
+        step3_message = codec.build_advertise(
             run_id=run_id,
             request_id="student-advertise-seeking-1",
             selling=[],
             seeking=[Resource.COMPONENTS],
             expires_tick=6,
-        ),
-    )
-    _require(outcome.ok, "step 3: advertise seeking components was rejected")
-    advertisement_id = outcome.object_id
-    _require(advertisement_id is not None, "step 3: result had no object_id")
-    await session.wait_for(lambda world: world.world_version >= 4)
-    logger.info("scenario step 3/10 done: advertisement_id=%s", advertisement_id)
+        )
+        if run_log:
+            run_log.decision(session.world, key="step3", reason="advertise seeking components",
+                              request_id="student-advertise-seeking-1", message=step3_message)
+        outcome = await session.send(request_id="student-advertise-seeking-1", message=step3_message)
+        if run_log:
+            run_log.command_result(session.world, key="step3", outcome=outcome)
+        _require(outcome.ok, "step 3: advertise seeking components was rejected")
+        advertisement_id = outcome.object_id
+        _require(advertisement_id is not None, "step 3: result had no object_id")
+        await session.wait_for(lambda world: world.world_version >= 4)
+        logger.info("scenario step 3/10 done: advertisement_id=%s", advertisement_id)
+        logger.info("%s", format_status_report(session.world))
+        snapshot(session.world)
 
-    # Step 4: offer two water for one food.
-    outcome = await session.send(
-        request_id="student-offer-1",
-        message=codec.build_offer(
+        # Step 4: offer two water for one food.
+        step4_message = codec.build_offer(
             run_id=run_id,
             request_id="student-offer-1",
             recipient_id="P02",
             give=Bundle(water=2),
             receive=Bundle(food=1),
             expires_tick=6,
-        ),
-    )
-    _require(outcome.ok, "step 4: offer was rejected")
-    our_offer_id = outcome.object_id
-    _require(our_offer_id is not None, "step 4: result had no object_id")
-    logger.info("scenario step 4/10 done: offer_id=%s", our_offer_id)
-
-    # Steps 5-6: P02 accepts our offer and separately offers us a gift, both
-    # arriving as state pushes with no command of ours in between. Both
-    # conditions must be checked against the *same* wait_for predicate --
-    # waiting on "accepted" alone can return as soon as step 5's push lands,
-    # before the pump has applied step 6's separate gift push.
-    def _accepted_and_gifted(world: WorldView) -> bool:
-        accepted = any(
-            offer.offer_id == our_offer_id and offer.status is OfferStatus.ACCEPTED
-            for offer in world.offers
         )
-        gifted = any(offer.is_gift() for offer in world.open_offers_to_me())
-        return accepted and gifted
+        if run_log:
+            run_log.decision(session.world, key="step4", reason="offer 2 water for 1 food to P02",
+                              request_id="student-offer-1", message=step4_message)
+        outcome = await session.send(request_id="student-offer-1", message=step4_message)
+        if run_log:
+            run_log.command_result(session.world, key="step4", outcome=outcome)
+        _require(outcome.ok, "step 4: offer was rejected")
+        our_offer_id = outcome.object_id
+        _require(our_offer_id is not None, "step 4: result had no object_id")
+        logger.info("scenario step 4/10 done: offer_id=%s", our_offer_id)
+        logger.info("%s", format_status_report(session.world))
+        snapshot(session.world)
 
-    world = await session.wait_for(_accepted_and_gifted)
-    gift = next((offer for offer in world.open_offers_to_me() if offer.is_gift()), None)
-    _require(gift is not None, "steps 5-6: no gift offer from P02 after our offer was accepted")
-    logger.info("scenario steps 5-6/10 done: gift offer_id=%s", gift.offer_id)
+        # Steps 5-6: P02 accepts our offer and separately offers us a gift, both
+        # arriving as state pushes with no command of ours in between. Both
+        # conditions must be checked against the *same* wait_for predicate --
+        # waiting on "accepted" alone can return as soon as step 5's push lands,
+        # before the pump has applied step 6's separate gift push.
+        def _accepted_and_gifted(world: WorldView) -> bool:
+            accepted = any(
+                offer.offer_id == our_offer_id and offer.status is OfferStatus.ACCEPTED
+                for offer in world.offers
+            )
+            gifted = any(offer.is_gift() for offer in world.open_offers_to_me())
+            return accepted and gifted
 
-    # Step 7: accept the gift.
-    outcome = await session.send(
-        request_id="student-accept-1",
-        message=codec.build_accept(
+        world = await session.wait_for(_accepted_and_gifted)
+        gift = next((offer for offer in world.open_offers_to_me() if offer.is_gift()), None)
+        _require(gift is not None, "steps 5-6: no gift offer from P02 after our offer was accepted")
+        logger.info("scenario steps 5-6/10 done: gift offer_id=%s", gift.offer_id)
+        logger.info("%s", format_status_report(world))
+        snapshot(world)
+
+        # Step 7: accept the gift.
+        step7_message = codec.build_accept(
             run_id=run_id, request_id="student-accept-1", offer_id=gift.offer_id
-        ),
-    )
-    _require(outcome.ok, "step 7: accepting the gift was rejected")
-    await session.wait_for(lambda world: world.world_version >= 8)
-    logger.info("scenario step 7/10 done: accepted gift")
+        )
+        if run_log:
+            run_log.decision(world, key="step7", reason=f"accept gift {gift.offer_id} from P02",
+                              request_id="student-accept-1", message=step7_message)
+        outcome = await session.send(request_id="student-accept-1", message=step7_message)
+        if run_log:
+            run_log.command_result(session.world, key="step7", outcome=outcome)
+        _require(outcome.ok, "step 7: accepting the gift was rejected")
+        await session.wait_for(lambda world: world.world_version >= 8)
+        logger.info("scenario step 7/10 done: accepted gift")
+        logger.info("%s", format_status_report(session.world))
+        snapshot(session.world)
 
-    # Step 8: withdraw the advertisement.
-    outcome = await session.send(
-        request_id="student-withdraw-1",
-        message=codec.build_withdraw(
+        # Step 8: withdraw the advertisement.
+        step8_message = codec.build_withdraw(
             run_id=run_id, request_id="student-withdraw-1", object_id=advertisement_id
-        ),
-    )
-    _require(outcome.ok, "step 8: withdrawing the advertisement was rejected")
-    await session.wait_for(lambda world: world.world_version >= 9)
-    logger.info("scenario step 8/10 done: withdrew advertisement")
+        )
+        if run_log:
+            run_log.decision(session.world, key="step8", reason=f"withdraw advertisement {advertisement_id}",
+                              request_id="student-withdraw-1", message=step8_message)
+        outcome = await session.send(request_id="student-withdraw-1", message=step8_message)
+        if run_log:
+            run_log.command_result(session.world, key="step8", outcome=outcome)
+        _require(outcome.ok, "step 8: withdrawing the advertisement was rejected")
+        await session.wait_for(lambda world: world.world_version >= 9)
+        logger.info("scenario step 8/10 done: withdrew advertisement")
+        logger.info("%s", format_status_report(session.world))
+        snapshot(session.world)
 
-    # Step 9: the exercise's stored-result limit (five) is deliberately
-    # exceeded by this command; the server answers with protocol_error
-    # instead of a result.
-    try:
-        await session.send(
+        # Step 9: the exercise's stored-result limit (five) is deliberately
+        # exceeded by this command; the server answers with protocol_error
+        # instead of a result.
+        step9_message = codec.build_advertise(
+            run_id=run_id,
             request_id="student-advertise-2",
-            message=codec.build_advertise(
-                run_id=run_id,
-                request_id="student-advertise-2",
-                selling=[Resource.WATER],
-                seeking=[Resource.FOOD],
-                expires_tick=6,
-            ),
+            selling=[Resource.WATER],
+            seeking=[Resource.FOOD],
+            expires_tick=6,
         )
-    except ProtocolErrorReceived as error:
-        _require(
-            error.code == bazaar_pb2.CONTROL_CODE_REQUEST_CAPACITY_EXCEEDED,
-            f"step 9: expected CONTROL_CODE_REQUEST_CAPACITY_EXCEEDED, "
-            f"got {bazaar_pb2.ControlCode.Name(error.code)}",
-        )
-    else:
-        raise ScenarioError("step 9: expected a protocol_error, command succeeded instead")
-    logger.info("scenario step 9/10 done: confirmed request-capacity error")
+        if run_log:
+            run_log.decision(session.world, key="step9", reason="advertise beyond the stored-result limit",
+                              request_id="student-advertise-2", message=step9_message)
+        try:
+            await session.send(request_id="student-advertise-2", message=step9_message)
+        except ProtocolErrorReceived as error:
+            _require(
+                error.code == bazaar_pb2.CONTROL_CODE_REQUEST_CAPACITY_EXCEEDED,
+                f"step 9: expected CONTROL_CODE_REQUEST_CAPACITY_EXCEEDED, "
+                f"got {bazaar_pb2.ControlCode.Name(error.code)}",
+            )
+        else:
+            raise ScenarioError("step 9: expected a protocol_error, command succeeded instead")
+        logger.info("scenario step 9/10 done: confirmed request-capacity error")
 
-    # Step 10: sync and return the final state.
-    world = await session.sync()
-    logger.info(
-        "scenario step 10/10 done: final inventory=%s, %d transaction(s)",
-        world.self.inventory,
-        len(world.transactions),
-    )
+        # Step 10: sync and return the final state.
+        world = await session.sync()
+        logger.info(
+            "scenario step 10/10 done: final inventory=%s, %d transaction(s)",
+            world.self.inventory,
+            len(world.transactions),
+        )
+        logger.info("%s", format_status_report(world))
+        snapshot(world)
+    except Exception as exc:
+        if run_log:
+            run_log.run_ended(session.world, reason=f"error: {exc}")
+        raise
+    if run_log:
+        run_log.run_ended(world, reason="all ten steps completed")
     return world

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Tuple
 
 from planet_charlu.domain.resources import Bundle
 from planet_charlu.generated import bazaar_pb2
@@ -32,3 +33,14 @@ class Transaction:
 
     def involves(self, station_id: str) -> bool:
         return self.proposer_id == station_id or self.recipient_id == station_id
+
+    def relative_to(self, station_id: str) -> Tuple[str, Bundle, Bundle]:
+        """Resolve wire's proposer/recipient framing to ``station_id``'s own view.
+
+        Returns ``(counterparty_id, we_gave, we_received)``. The wire
+        ``give``/``receive`` are from the *proposer's* perspective, so a
+        recipient's actual gave/received is the reverse of a proposer's.
+        """
+        if self.proposer_id == station_id:
+            return self.recipient_id, self.give, self.receive
+        return self.proposer_id, self.receive, self.give

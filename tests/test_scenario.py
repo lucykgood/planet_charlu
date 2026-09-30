@@ -18,8 +18,11 @@ from planet_charlu.config import ClientConfig
 from planet_charlu.connection import BazaarConnection, REQUIRED_SUBPROTOCOL
 from planet_charlu.domain.resources import Bundle
 from planet_charlu.generated import bazaar_pb2
+from planet_charlu.logging_utils import TICK_SEPARATOR
+from planet_charlu.run_summary import RunSummary, load_events, render_html
 from planet_charlu.scenario import ScenarioError, run_sample_scenario
 from planet_charlu.session import open_session
+from planet_charlu.structured_log import RunLog
 
 from fixtures import (
     make_advertisement,
@@ -280,13 +283,14 @@ def _full_scenario_handler(run_id: str = "run-1"):
     return handler
 
 
-async def test_run_sample_scenario_matches_validator_spec():
+async def test_run_sample_scenario_matches_validator_spec(caplog):
     server, url = await _serve(_full_scenario_handler())
     try:
         config = ClientConfig(ws_url=url, token="t", station_id="P01")
         async with BazaarConnection(config) as connection:
             session = await open_session(connection)
-            world = await asyncio.wait_for(run_sample_scenario(session), timeout=2)
+            with caplog.at_level("INFO"):
+                world = await asyncio.wait_for(run_sample_scenario(session), timeout=2)
             await session.stop_pump()
     finally:
         server.close()
@@ -297,6 +301,71 @@ async def test_run_sample_scenario_matches_validator_spec():
     assert world.self.inventory == Bundle(28, 31, 31)
     assert len(world.transactions) == 2
     assert len(world.request_results) == 5
+
+    # The same human-readable dashboard strategy.run_trading() logs per tick
+    # also renders across the ten-step exercise, so the validator is a real,
+    # local way to see it (and confirm --run-log parity isn't silently lost).
+    messages = [record.getMessage() for record in caplog.records]
+    dashboards = [m for m in messages if m.startswith(TICK_SEPARATOR)]
+    assert len(dashboards) >= 7  # initial + one after each state-changing step
+    assert "recent trades (last 2):" in dashboards[-1]
+
+
+async def test_run_sample_scenario_writes_structured_log_and_renders_summary(tmp_path):
+    """The ten-step exercise is a real, local way to verify --run-log/HTML
+    parity: no live match needed, and this exercises the same RunLog.decision
+    /command_result methods run_trading() uses, generalized to accept plain
+    key/reason/request_id fields instead of a strategy.Decision object.
+    """
+    server, url = await _serve(_full_scenario_handler())
+    log_path = tmp_path / "scenario.jsonl"
+    try:
+        config = ClientConfig(ws_url=url, token="t", station_id="P01")
+        async with BazaarConnection(config) as connection:
+            session = await open_session(connection)
+            with RunLog.open(log_path) as run_log:
+                world = await asyncio.wait_for(
+                    run_sample_scenario(session, run_log=run_log), timeout=2
+                )
+            await session.stop_pump()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    events = load_events(log_path)
+    kinds = [e["event"] for e in events]
+    assert kinds[0] == "run_started"
+    assert kinds[-1] == "run_ended"
+    assert kinds.count("decision") == 6  # steps 2, 3, 4, 7, 8, 9
+    assert kinds.count("command_result") == 5  # step 9 errors, not a Result
+    assert kinds.count("transaction_settled") == 2  # our offer settling, plus the gift
+
+    run_ended = events[-1]
+    assert run_ended["reason"] == "all ten steps completed"
+    assert run_ended["final_inventory"] == {"water": 28, "food": 31, "components": 31}
+
+    # "What did it send" is the exact terms, not just a free-text reason.
+    step4 = next(e for e in events if e.get("key") == "step4")
+    assert step4["sent"] == {
+        "command": "offer", "recipient_id": "P02", "expires_tick": 6,
+        "give": {"water": 2, "food": 0, "components": 0},
+        "receive": {"water": 0, "food": 1, "components": 0},
+    }
+
+    # "What did it know" -- the actual offers on the board, not just counts --
+    # shows up once P02's gift is visible (steps 5-6).
+    incoming_offers_seen = [
+        offer for e in events if e["event"] == "offers_open" for offer in e["incoming"]
+    ]
+    assert any(o["counterparty"] == "P02" and o["we_give"] == {"water": 0, "food": 0, "components": 0}
+               for o in incoming_offers_seen)
+
+    # The exact same summary generator trade mode uses renders this too.
+    summary = RunSummary(events)
+    assert not summary.incomplete
+    html = render_html(summary)
+    assert "<html" in html
+    assert world.self.inventory == Bundle(28, 31, 31)
 
 
 async def test_run_sample_scenario_raises_when_step2_result_not_ok():

@@ -35,6 +35,8 @@ Paths below are relative to `src/planet_charlu/`.
 | `strategy.py` | Self-sufficient decision policy, attempt accounting, and continuous trading runner. |
 | `scenario.py` | Fixed validator steps 2–10; step 1 is the session handshake. |
 | `logging_utils.py` | Logging setup and concise server-message summaries. |
+| `structured_log.py` | JSON Lines run log (`RunLog`), on by default via `main.py`; see `docs/task7-structured-log-proposal.md`. |
+| `run_summary.py` | Parses a `RunLog` file and renders the interactive HTML dashboard; `main.py` calls it automatically after every run, `scripts/generate_run_summary.py` is a CLI wrapper around it. |
 | `domain/resources.py` | Resource enum and nonnegative bundle arithmetic. |
 | `domain/offers.py`, `domain/advertisements.py` | Wire-to-domain conversion, status, ownership, and expiry helpers. |
 | `domain/station.py`, `domain/transactions.py`, `domain/outcomes.py` | Own-station observations, settled trades, and command outcomes. |
@@ -118,11 +120,14 @@ expected sequencing in `scenario.py`.
 | `tests/test_domain_*.py` | Conversion, resource arithmetic, status/expiry boundaries, and snapshot independence. |
 | `tests/test_codec.py`, `tests/test_proto.py` | Command fields, wire round trips, and generated binding smoke checks. |
 | `tests/test_config.py`, `tests/test_logging_utils.py`, `tests/test_main.py` | Configuration precedence/redaction, message summaries, and entry-point wiring. |
+| `tests/test_structured_log.py`, `tests/test_generate_run_summary.py` | Run log event content/idempotency and the summary script's parsing/rendering. |
 | `tests/test_commands.py` | Request correlation, duplicate pending IDs, and error delivery. |
 | `tests/test_connection.py`, `tests/test_session.py` | Local WebSocket transport, handshake, phase gating, and session updates. |
 | `tests/test_scenario.py` | Scripted ten-step validator exchange and failure paths. |
 | `tests/test_strategy.py` | Reserve protection, policy limits, partner rotation, and a simulated nine-planet exchange. |
 | `scripts/check_validation.py` | Manual assertions against a fresh real validator exercise. |
+| `scripts/generate_run_summary.py` | Thin CLI wrapper around `planet_charlu.run_summary.write_summary` for regenerating an HTML summary by hand; standalone (adds `src/` to `sys.path` itself, no env setup needed). |
+| `scripts/demo_local_run.py` | Drives `run_trading()` against a scripted local WebSocket server (no live match or validator binary needed) to smoke-test the dashboard and `--run-log` export. |
 | `scripts/generate_proto.sh`, `scripts/verify_proto.sh` | Binding generation and generation/import verification. |
 | `scripts/run_validator.sh` | Selects the bundled Linux binary for the current CPU and forwards options. |
 | `validator/` | Supplied ARM64/x86-64 binaries and the detailed exchange specification. |
