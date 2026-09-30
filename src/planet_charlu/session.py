@@ -106,7 +106,11 @@ class ClientSession:
     async def _pump(self) -> None:
         try:
             async for message in self._messages:
-                logger.info("received %s", describe_server_message(message))
+                # Every snapshot push logs here, far more often than a tick
+                # changes; strategy.py's per-tick dashboard and per-decision
+                # lines are the human-facing summary of the same data, so this
+                # raw wire-level trace stays at DEBUG (`--verbose` to see it).
+                logger.debug("received %s", describe_server_message(message))
                 kind = message.WhichOneof("message")
                 if kind == "state":
                     if message.state.run_id != self.world.run_id:

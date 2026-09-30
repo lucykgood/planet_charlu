@@ -9,10 +9,12 @@ from fixtures import (make_state, make_self_observation, make_bundle, make_offer
 from planet_charlu import codec
 from planet_charlu.config import ClientConfig, load_config
 from planet_charlu.connection import BazaarConnection, REQUIRED_SUBPROTOCOL
+from planet_charlu.domain.offers import Offer
 from planet_charlu.domain.resources import Bundle
 from planet_charlu.domain.world import WorldView
 from planet_charlu.generated import bazaar_pb2 as pb
 from planet_charlu.session import open_session, ClientSession
+from planet_charlu.logging_utils import TICK_SEPARATOR
 from planet_charlu.strategy import SelfSufficientStrategy, run_trading
 
 
@@ -102,7 +104,11 @@ def test_worse_than_equal_trade_rejected():
     # 2 food for 3 water is affordable and would even count as "useful" by
     # resource type, but it is strictly worse than 1:1 for us -- refused.
     worse = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(0, 2), receive=make_bundle(3))
-    assert SelfSufficientStrategy().choose(world(offers=[worse])).message.WhichOneof('message') != 'accept'
+    strategy = SelfSufficientStrategy()
+    assert strategy.choose(world(offers=[worse])).message.WhichOneof('message') != 'accept'
+    ((reviewed_offer, reason),) = strategy.last_offer_review
+    assert reviewed_offer.offer_id == worse.offer_id
+    assert reason == 'unfavorable: would give more than we receive'
 
 
 def test_unfavorable_help_request_no_longer_fulfilled():
@@ -111,20 +117,28 @@ def test_unfavorable_help_request_no_longer_fulfilled():
     # The "favorable or equal only" rule refuses it even though it's a tiny,
     # affordable amount.
     ask = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(), receive=make_bundle(2))
-    assert SelfSufficientStrategy().choose(world(offers=[ask])).message.WhichOneof('message') != 'accept'
+    strategy = SelfSufficientStrategy()
+    assert strategy.choose(world(offers=[ask])).message.WhichOneof('message') != 'accept'
+    assert strategy.last_offer_review[0][1] == 'unfavorable: would give more than we receive'
 
 
 def test_incoming_trade_rejected_if_it_would_cost_an_unproduced_resource():
     # Plenty of components for a little food looks favorable by the
     # numbers, but it asks us to pay in food -- one of the two resources we
     # rely on trade for ourselves. Refused regardless of how good the ratio is.
+    # (High food inventory here isolates this from the reserve-safety check,
+    # which would otherwise trigger first on the smaller default balance.)
     offer = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(0, 0, 5), receive=make_bundle(0, 1))
-    assert SelfSufficientStrategy().choose(world(offers=[offer])).message.WhichOneof('message') != 'accept'
+    strategy = SelfSufficientStrategy()
+    assert strategy.choose(world(inventory=(30, 10, 5), offers=[offer])).message.WhichOneof('message') != 'accept'
+    assert strategy.last_offer_review[0][1] == 'would require payment beyond our specialty'
 
 
 def test_unaffordable_exchange_not_funded_by_promised_receipts():
     offer = make_offer(proposer_id='P09', recipient_id='P01', give=make_bundle(100, 2), receive=make_bundle(31))
-    assert SelfSufficientStrategy().choose(world(offers=[offer])).message.WhichOneof('message') != 'accept'
+    strategy = SelfSufficientStrategy()
+    assert strategy.choose(world(offers=[offer])).message.WhichOneof('message') != 'accept'
+    assert strategy.last_offer_review[0][1] == 'insufficient stock to cover what it asks'
 
 
 def test_commitments_prevent_double_spending_and_unsafe_offers_withdrawn():
@@ -198,6 +212,26 @@ def test_expired_offers_and_advertisements_ignored():
     strategy = SelfSufficientStrategy()
     skip_ad(strategy, w)
     assert strategy.choose(w) is None
+    assert strategy.last_offer_review == [(Offer.from_wire(gift), 'expired')]
+
+
+def test_offer_review_records_reserve_breach_reason():
+    # Accepting would require giving away more water than the reserve
+    # allows, even though the food it offers would rescue a critical
+    # shortage -- refused, and the review says why.
+    unsafe = make_offer(offer_id='unsafe', proposer_id='P08', recipient_id='P01',
+                         give=make_bundle(0, 5), receive=make_bundle(29))
+    strategy = SelfSufficientStrategy()
+    strategy.choose(world(inventory=(30, 0, 5), offers=[unsafe]))
+    assert strategy.last_offer_review == [(Offer.from_wire(unsafe), 'would breach the upkeep reserve')]
+
+
+def test_offer_review_records_accepted_reason_for_the_chosen_offer():
+    gift = make_offer(proposer_id='P09', recipient_id='P01', receive=make_bundle())
+    strategy = SelfSufficientStrategy()
+    action = strategy.choose(world(inventory=(0, 0, 0), offers=[gift]))
+    assert action.message.WhichOneof('message') == 'accept'
+    assert strategy.last_offer_review == [(Offer.from_wire(gift), 'accepted')]
 
 
 def test_gifts_rotate_across_all_eight_partners():
@@ -299,7 +333,7 @@ async def test_disconnect_wakes_snapshot_waiter():
         await session.stop_pump()
 
 
-async def test_nine_planet_websocket_simulation():
+async def test_nine_planet_websocket_simulation(caplog):
     """Real handshake/codec/session/runner with eight accepting peer planets."""
     peers = {f'P{i:02}' for i in range(2, 10)}
     recipients = set()
@@ -377,16 +411,24 @@ async def test_nine_planet_websocket_simulation():
             errors.append(exc)
             raise
 
-    async with websockets.serve(handler, '127.0.0.1', 0, subprotocols=[REQUIRED_SUBPROTOCOL]) as server:
-        port = server.sockets[0].getsockname()[1]
-        async with BazaarConnection(ClientConfig(f'ws://127.0.0.1:{port}', 'test', 'P01')) as connection:
-            session = await open_session(connection)
-            try:
-                final = await asyncio.wait_for(run_trading(session), 3)
-            finally:
-                await session.stop_pump()
+    with caplog.at_level('INFO'):
+        async with websockets.serve(handler, '127.0.0.1', 0, subprotocols=[REQUIRED_SUBPROTOCOL]) as server:
+            port = server.sockets[0].getsockname()[1]
+            async with BazaarConnection(ClientConfig(f'ws://127.0.0.1:{port}', 'test', 'P01')) as connection:
+                session = await open_session(connection)
+                try:
+                    final = await asyncio.wait_for(run_trading(session), 3)
+                finally:
+                    await session.stop_pump()
     assert not errors
     assert recipients == peers
     assert {'accept', 'advertise', 'offer', 'sync'} <= set(kinds)
     assert final.phase == pb.PHASE_FINISHED
     assert final.self.inventory == Bundle(84, 31, 30)
+
+    # The human-readable console output stays readable: a per-tick dashboard
+    # and short ok/rejected result lines, not raw request IDs on every command.
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(m.startswith(TICK_SEPARATOR + '\ntick 0 | ') for m in messages)
+    assert '  -> ok' in messages
+    assert not any('request_id=' in m and m.startswith('trading:') for m in messages)

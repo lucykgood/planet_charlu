@@ -11,6 +11,35 @@ def test_defaults_apply_when_nothing_else_given():
     assert config.ws_url == "wss://spaceport.edneo.com/ws"
     assert config.station_id == "P01"
     assert config.token == "inline-token"
+    assert config.verbose is False
+
+
+def test_verbose_flag():
+    assert load_config(["--token", "t"], {}).verbose is False
+    assert load_config(["--token", "t", "--verbose"], {}).verbose is True
+    assert load_config(["--token", "t", "-v"], {}).verbose is True
+
+
+def test_open_browser_defaults_to_true_via_cli_but_false_on_direct_construction():
+    assert load_config(["--token", "t"], {}).open_browser is True
+    assert load_config(["--token", "t", "--no-open-browser"], {}).open_browser is False
+    # Bypassing the CLI (as tests that construct ClientConfig directly do)
+    # must never open a browser as a side effect.
+    assert ClientConfig(ws_url="ws://x/ws", token="t", station_id="P01").open_browser is False
+
+
+def test_run_log_path_defaults_to_an_auto_named_file_under_runs():
+    config = load_config(["--token", "t", "--station-id", "P07"], {})
+
+    assert config.run_log_path is not None
+    assert config.run_log_path.startswith("runs/P07-")
+    assert config.run_log_path.endswith(".jsonl")
+
+
+def test_run_log_path_override_is_respected():
+    config = load_config(["--token", "t", "--run-log", "custom/path.jsonl"], {})
+
+    assert config.run_log_path == "custom/path.jsonl"
 
 
 def test_env_vars_override_defaults():

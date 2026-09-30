@@ -11,10 +11,19 @@ from dataclasses import dataclass
 
 from planet_charlu import codec
 from planet_charlu.commands import generate_request_id
+from planet_charlu.domain.offers import Offer
 from planet_charlu.domain.resources import Bundle, Resource
 from planet_charlu.domain.world import WorldView
 from planet_charlu.generated import bazaar_pb2 as pb
+from planet_charlu.logging_utils import (
+    format_offer_review,
+    format_result_extra,
+    format_sent_terms,
+    format_status_report,
+    humanize_result_code,
+)
 from planet_charlu.session import ClientSession
+from planet_charlu.structured_log import RunLog
 
 logger = logging.getLogger(__name__)
 RESOURCES = tuple(Resource)
@@ -86,6 +95,11 @@ class SelfSufficientStrategy:
         self.last_ad_tick = -100
         self.known_suppliers: dict[str, set[Resource]] = {}
         self.seen_transactions: set[str] = set()
+        # Every incoming offer this call's loop actually looked at, with why
+        # it was accepted or passed on -- repopulated fresh on every
+        # choose() call so a caller can log it regardless of whether this
+        # call ends up returning a Decision.
+        self.last_offer_review: list[tuple[Offer, str]] = []
 
     def _learn_suppliers(self, world: WorldView) -> None:
         """Record which resource each partner actually delivered.
@@ -113,6 +127,7 @@ class SelfSufficientStrategy:
 
     def choose(self, world: WorldView) -> Decision | None:
         self._learn_suppliers(world)
+        self.last_offer_review = []
         if world.tick != self.tick:
             self.tick = world.tick
             self.attempted.clear()
@@ -170,17 +185,24 @@ class SelfSufficientStrategy:
         incoming = sorted(world.open_offers_to_me(),
                           key=lambda o: (not rescues_critical(o), not o.is_gift(), o.created_tick, o.offer_id))
         for offer in incoming:
-            if offer.is_expired_by(world.tick) or not available.covers(offer.receive):
+            if offer.is_expired_by(world.tick):
+                self.last_offer_review.append((offer, 'expired'))
+                continue
+            if not available.covers(offer.receive):
+                self.last_offer_review.append((offer, 'insufficient stock to cover what it asks'))
                 continue
             after = available.minus(offer.receive) + offer.give
             safe = all(quantity(after, r) >= min(quantity(available, r), quantity(reserve, r)) for r in RESOURCES)
             if not safe:
+                self.last_offer_review.append((offer, 'would breach the upkeep reserve'))
                 continue
             if offer.is_gift():
                 result = decision('accept:' + offer.offer_id, 'accept free gift',
                                   codec.build_accept(**common, offer_id=offer.offer_id))
                 if result:
+                    self.last_offer_review.append((offer, 'accepted'))
                     return result
+                self.last_offer_review.append((offer, 'already attempted this tick, or message too large'))
                 continue
             # Never pay in a resource we don't produce -- only our specialty
             # may fund a paid trade (the emergency exception above still
@@ -197,7 +219,17 @@ class SelfSufficientStrategy:
                 result = decision('accept:' + offer.offer_id, 'accept favorable-or-equal trade for a resource we need',
                                   codec.build_accept(**common, offer_id=offer.offer_id))
                 if result:
+                    self.last_offer_review.append((offer, 'accepted'))
                     return result
+                self.last_offer_review.append((offer, 'already attempted this tick, or message too large'))
+            elif not pays_only_specialty:
+                self.last_offer_review.append((offer, 'would require payment beyond our specialty'))
+            elif not favorable_or_equal:
+                self.last_offer_review.append((offer, 'unfavorable: would give more than we receive'))
+            elif not nets_needed:
+                self.last_offer_review.append((offer, "doesn't net a resource we're seeking"))
+            else:
+                self.last_offer_review.append((offer, 'routine budget exhausted; not a rescue'))
 
         # We only ever advertise our specialty as surplus; the other two are
         # never for sale, no matter how much of them we happen to be holding.
@@ -295,30 +327,61 @@ class SelfSufficientStrategy:
             self.last_ad_tick = self.tick
 
 
-async def run_trading(session: ClientSession) -> WorldView:
+async def run_trading(session: ClientSession, run_log: RunLog | None = None) -> WorldView:
     strategy = SelfSufficientStrategy()
     strategy.sent_total = len(session.world.request_results)
     logger.info('self-sufficient trading started: station=%s specialty=%s',
                 session.world.self_station_id, session.world.self.specialty.value)
+    if run_log:
+        run_log.run_started(session.world, mode='trade')
+    logged_tick = None
     while True:
         world = session.world
+        if world.tick != logged_tick:
+            logged_tick = world.tick
+            logger.info("%s", format_status_report(world))
+            if run_log:
+                run_log.tick_snapshot(world, sent_total=strategy.sent_total)
+                run_log.transactions_settled(world)
+                run_log.offers_snapshot(world)
+                run_log.refresh_html()
         if world.phase in (pb.PHASE_FINISHED, pb.PHASE_ABORTED) or world.self.health == 0 or world.self.failed_once:
+            if run_log:
+                run_log.run_ended(world, reason='phase finished or station failed')
             return world
         action = strategy.choose(world)
+        review_line = format_offer_review(world, strategy.last_offer_review)
+        if review_line:
+            logger.info('%s', review_line)
+        if run_log:
+            for offer, note in strategy.last_offer_review:
+                if note != 'accepted':
+                    run_log.offer_passed(world, offer, reason=note)
         if action is None:
             # Waiting for a partner is normal; it has no five-second deadline.
             sequence = world.snapshot_sequence
             await session.wait_for(lambda w: w.snapshot_sequence > sequence, timeout=None)
             continue
         strategy.record(action)
-        logger.info('trading: %s', action.reason)
+        logger.info('trading: %s (%s)', action.reason, format_sent_terms(action.message))
+        if run_log:
+            run_log.decision(world, key=action.key, reason=action.reason,
+                              request_id=action.request_id, message=action.message)
         try:
             outcome = await asyncio.wait_for(session.send(request_id=action.request_id, message=action.message), timeout=15)
-            logger.info('trading result: %s request_id=%s', outcome.code_name, outcome.request_id)
+            if outcome.ok:
+                logger.info('  -> ok%s', format_result_extra(outcome))
+            else:
+                retry_note = f' (retry after tick {outcome.retry_after_tick})' if outcome.retry_after_tick else ''
+                logger.info('  -> rejected: %s%s', humanize_result_code(outcome.code), retry_note)
+            if run_log:
+                run_log.command_result(world, key=action.key, outcome=outcome)
             if outcome.code == pb.RESULT_CODE_RATE_LIMITED:
                 strategy.retry_tick = max(world.tick + 1, outcome.retry_after_tick or 0)
             # Reconcile server inventory/commitments before every next decision.
             # Never blindly resend a command whose settlement is uncertain.
             await session.sync(timeout=15)
         except asyncio.TimeoutError as exc:
+            if run_log:
+                run_log.run_ended(session.world, reason='command or sync timeout')
             raise RuntimeError('server did not acknowledge a command or synchronize within 15 seconds; stopped to avoid trading on stale inventory') from exc

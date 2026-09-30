@@ -12,12 +12,14 @@ import argparse
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Mapping, Sequence
 
 DEFAULT_WS_URL = "wss://spaceport.edneo.com/ws"
 DEFAULT_STATION_ID = "P01"
 DEFAULT_CREDENTIALS_FILE = "validation-credentials.json"
+DEFAULT_RUN_LOG_DIR = "runs"
 
 
 class ConfigError(RuntimeError):
@@ -30,11 +32,15 @@ class ClientConfig:
     token: str
     station_id: str
     mode: str = "trade"
+    run_log_path: str | None = None
+    open_browser: bool = False
+    verbose: bool = False
 
     def __repr__(self) -> str:
         return (
             f"ClientConfig(ws_url={self.ws_url!r}, station_id={self.station_id!r}, "
-            "token='***redacted***')"
+            f"run_log_path={self.run_log_path!r}, open_browser={self.open_browser!r}, "
+            f"token='***redacted***')"
         )
 
     __str__ = __repr__
@@ -91,6 +97,26 @@ def _build_parser(env: Mapping[str, str]) -> argparse.ArgumentParser:
     )
     parser.add_argument("--mode", choices=("trade", "validation"), default="trade",
                         help="Continuous self-sufficient trading (default) or the validator exercise")
+    parser.add_argument(
+        "--run-log",
+        default=env.get("BAZAAR_RUN_LOG"),
+        dest="run_log_path",
+        help="Path to append a structured JSON-Lines run log to. An HTML summary "
+             "(scripts/generate_run_summary.py) is generated automatically from it "
+             f"when the run ends. Defaults to an auto-named file under {DEFAULT_RUN_LOG_DIR}/ "
+             "(env: BAZAAR_RUN_LOG)",
+    )
+    parser.add_argument(
+        "--no-open-browser", dest="open_browser", action="store_false", default=True,
+        help="Don't automatically open the HTML run summary in a browser after its first "
+             "write. On by default; turn it off in a headless environment (e.g. Docker) "
+             "where there is no browser to open.",
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Also log raw per-message protocol detail (DEBUG level); the default "
+             "INFO level shows the per-tick dashboard and per-decision lines only",
+    )
     return parser
 
 
@@ -110,4 +136,23 @@ def load_config(
     if not token:
         token = _token_from_credentials_file(Path(args.credentials_file), args.station_id)
 
-    return ClientConfig(ws_url=args.ws_url, token=token, station_id=args.station_id, mode=args.mode)
+    run_log_path = args.run_log_path or _default_run_log_path(args.station_id)
+
+    return ClientConfig(
+        ws_url=args.ws_url,
+        token=token,
+        station_id=args.station_id,
+        mode=args.mode,
+        run_log_path=run_log_path,
+        open_browser=args.open_browser,
+        verbose=args.verbose,
+    )
+
+
+def _default_run_log_path(station_id: str) -> str:
+    """An auto-named path so every run gets a structured log and HTML summary
+    without needing ``--run-log`` -- see ``main.py``'s automatic write_summary
+    call and docs/task7-structured-log-proposal.md.
+    """
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    return f"{DEFAULT_RUN_LOG_DIR}/{station_id}-{timestamp}.jsonl"

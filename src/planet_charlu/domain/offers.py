@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 
 from planet_charlu.domain.resources import Bundle
 from planet_charlu.generated import bazaar_pb2
@@ -74,3 +74,14 @@ class Offer:
 
     def directed_to(self, station_id: str) -> bool:
         return self.recipient_id == station_id
+
+    def relative_to(self, station_id: str) -> Tuple[str, Bundle, Bundle]:
+        """Resolve wire's proposer/recipient framing to ``station_id``'s own view.
+
+        Returns ``(other_party_id, we_would_give, we_would_receive)``. The wire
+        ``give``/``receive`` are from the *proposer's* perspective, so a
+        recipient's own give/receive is the reverse of a proposer's.
+        """
+        if self.proposer_id == station_id:
+            return self.recipient_id, self.give, self.receive
+        return self.proposer_id, self.receive, self.give
