@@ -14,6 +14,7 @@ RUN apt-get update \
 WORKDIR /workspace
 
 COPY requirements.txt /tmp/requirements.txt
+COPY vendor/ /workspace/vendor/
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir -r /tmp/requirements.txt
