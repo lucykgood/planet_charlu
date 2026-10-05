@@ -250,3 +250,13 @@ WebSockets, not gRPC.
   cannot guarantee survival or acceptance by other clients.
 - The test simulation exercises cooperating peers; it is not a full game server.
   Validate policy changes in a coordinated run as well.
+
+### Shared run logging package
+
+The JSON Lines writer and HTML renderer live in the sibling `spbazaar-runlog`
+repository. This client keeps domain/protobuf translation in
+`planet_charlu.structured_log` and its existing summary import as a compatibility
+shim. Requirements install the bundled 0.1.0 wheel from `vendor/`, so local and
+Docker installs do not depend on a sibling checkout or a published package.
+To update it, build a wheel in `spbazaar-runlog`, copy it into `vendor/`, and
+update the wheel filename in requirements.

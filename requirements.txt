@@ -4,3 +4,4 @@ grpcio-tools
 pytest
 pytest-asyncio
 pytest-cov
+./vendor/spbazaar_runlog-0.1.0-py3-none-any.whl

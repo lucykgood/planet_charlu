@@ -41,7 +41,7 @@ from planet_charlu.domain.transactions import Transaction
 from planet_charlu.domain.world import WorldView
 from planet_charlu.generated import bazaar_pb2 as pb
 
-SCHEMA_VERSION = 1
+from spbazaar_runlog import RunLog as EventLog, SCHEMA_VERSION
 logger = logging.getLogger(__name__)
 
 
@@ -89,51 +89,11 @@ def _open_in_browser(path: Path) -> None:
         logger.exception("failed to open %s in a browser", path)
 
 
-@dataclass(frozen=True)
-class RunLog:
-    """Append-only JSON Lines writer for one run's structured log.
+class RunLog(EventLog):
+    """Client adapter: translate domain and wire objects to schema-v1 events."""
 
-    Use as a context manager so the file is always closed:
-
-        with RunLog.open(path, station_id=..., mode="trade") as run_log:
-            ...
-            run_log.run_started(world)
-            ...
-
-    Passing ``None`` in place of a ``RunLog`` (the default everywhere it is
-    accepted) disables logging entirely; callers do not need an ``if
-    run_log:`` guard around every call site because ``run_started`` etc. are
-    simply not called on ``None``. Call sites that always have a run in hand
-    use :class:`RunLog` directly; ``main.py`` is the only place a run log is
-    optional.
-
-    ``open_browser`` defaults to ``False`` so constructing a ``RunLog``
-    directly (every test, and any future caller) never has a side effect on
-    the machine it runs on; only ``main.py`` -- the real CLI entry point --
-    opts in, driven by ``ClientConfig.open_browser``.
-    """
-
-    path: Path
-    _file: IO[str]
-    _seen_transactions: set
-    open_browser: bool = False
-    _browser_opened: list = field(default_factory=list)
-
-    @classmethod
-    def open(cls, path: str | Path, *, open_browser: bool = False) -> "RunLog":
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        handle = open(path, "a", encoding="utf-8")
-        return cls(path=path, _file=handle, _seen_transactions=set(), open_browser=open_browser)
-
-    def __enter__(self) -> "RunLog":
-        return self
-
-    def __exit__(self, *exc_info) -> None:
-        self.close()
-
-    def close(self) -> None:
-        self._file.close()
+    def _write(self, event: str, tick: Optional[int], fields: dict) -> None:
+        self.write(event, tick, fields)
 
     def refresh_html(self) -> Optional[Path]:
         """Regenerate this run's HTML summary right now, so a page already
@@ -161,18 +121,6 @@ class RunLog:
             self._browser_opened.append(True)
             _open_in_browser(out_path)
         return out_path
-
-    def _write(self, event: str, tick: Optional[int], fields: dict) -> None:
-        record = {
-            "schema_version": SCHEMA_VERSION,
-            "event": event,
-            "wall_time": time.time(),
-            "tick": tick,
-            **fields,
-        }
-        self._file.write(json.dumps(record, sort_keys=True))
-        self._file.write("\n")
-        self._file.flush()
 
     def run_started(self, world: WorldView, *, mode: str) -> None:
         self._write(
