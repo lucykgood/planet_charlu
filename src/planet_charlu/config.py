@@ -30,6 +30,7 @@ class ClientConfig:
     token: str
     station_id: str
     mode: str = "trade"
+    conservative_trading: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -91,6 +92,12 @@ def _build_parser(env: Mapping[str, str]) -> argparse.ArgumentParser:
     )
     parser.add_argument("--mode", choices=("trade", "validation"), default="trade",
                         help="Continuous self-sufficient trading (default) or the validator exercise")
+    parser.add_argument(
+        "--conservative-trading", action=argparse.BooleanOptionalAction,
+        default=env.get("BAZAAR_CONSERVATIVE_TRADING", "false").lower() in ("true", "1", "yes"),
+        help="Target 15 ticks of supply and gift only for advertised resource emergencies "
+             "(env: BAZAAR_CONSERVATIVE_TRADING)",
+    )
     return parser
 
 
@@ -110,4 +117,5 @@ def load_config(
     if not token:
         token = _token_from_credentials_file(Path(args.credentials_file), args.station_id)
 
-    return ClientConfig(ws_url=args.ws_url, token=token, station_id=args.station_id, mode=args.mode)
+    return ClientConfig(ws_url=args.ws_url, token=token, station_id=args.station_id,
+                        mode=args.mode, conservative_trading=args.conservative_trading)

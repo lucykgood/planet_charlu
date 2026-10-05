@@ -19,11 +19,13 @@ def test_main_exits_with_status_1_on_config_error(monkeypatch):
 
 
 @pytest.mark.parametrize("mode", ["trade", "validation"])
-def test_main_runs_session_with_resolved_config(monkeypatch, mode):
+@pytest.mark.parametrize("conservative", [False, True])
+def test_main_runs_session_with_resolved_config(monkeypatch, mode, conservative):
     config = ClientConfig(ws_url="ws://x/ws", token="t", station_id="P01")
     monkeypatch.setattr(main_module, "load_config", lambda: config)
 
     config.mode = mode
+    config.conservative_trading = conservative
     seen = {}
 
     class FakeConnection:
@@ -45,7 +47,8 @@ def test_main_runs_session_with_resolved_config(monkeypatch, mode):
     async def fake_open_session(connection):
         return FakeSession()
 
-    async def fake_run_sample_scenario(session):
+    async def fake_run_sample_scenario(session, **kwargs):
+        seen.update(kwargs)
         return session.world
 
     monkeypatch.setattr(main_module, "BazaarConnection", FakeConnection)
@@ -55,6 +58,8 @@ def test_main_runs_session_with_resolved_config(monkeypatch, mode):
     main_module.main()
 
     assert seen["config"] is config
+    if mode == "trade":
+        assert seen["conservative"] is conservative
 
 
 def test_main_swallows_keyboard_interrupt(monkeypatch):

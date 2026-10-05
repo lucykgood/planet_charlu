@@ -75,6 +75,12 @@ class SelfSufficientStrategy:
     gift, and rescuing a critical resource are never rationed by it.
     """
     EMERGENCY_RESERVE = 4
+    RESERVE_TICKS = 3
+    TARGET_TICKS = 6
+    SEEK_SPECIALTY_TO_TARGET = False
+
+    def can_gift(self, world: WorldView, available: Bundle, ttl: int) -> bool:
+        return True
 
     def __init__(self) -> None:
         self.tick = -1
@@ -126,8 +132,9 @@ class SelfSufficientStrategy:
         remaining = max(0, rules.duration_ticks - world.tick)
         if not remaining:
             return None
-        reserve = scaled(world.self.upkeep_per_tick, min(3, remaining))
-        target = scaled(world.self.upkeep_per_tick, min(6, remaining))
+        reserve = scaled(world.self.upkeep_per_tick, min(self.RESERVE_TICKS, remaining))
+        emergency_reserve = scaled(world.self.upkeep_per_tick, min(3, remaining))
+        target = scaled(world.self.upkeep_per_tick, min(self.TARGET_TICKS, remaining))
         outgoing = [o for o in world.open_offers_from_me() if not o.is_expired_by(world.tick)]
         committed = Bundle.zero()
         for offer in outgoing:
@@ -135,7 +142,7 @@ class SelfSufficientStrategy:
         available = world.self.inventory.saturating_subtract(committed)
         surplus = available.saturating_subtract(reserve)
         needs = target.saturating_subtract(available)
-        critical = frozenset(r for r in RESOURCES if quantity(available, r) < quantity(reserve, r))
+        critical = frozenset(r for r in RESOURCES if quantity(available, r) < quantity(emergency_reserve, r))
         specialty = world.self.specialty
         not_produced = frozenset(RESOURCES) - {specialty}
         common = dict(run_id=world.run_id, request_id=generate_request_id())
@@ -148,7 +155,11 @@ class SelfSufficientStrategy:
             return Decision(key, reason, message)
 
         # Release unsafe commitments before taking on more obligations.
-        if not world.self.inventory.saturating_subtract(reserve).covers(committed):
+        commitment_reserve = reserve
+        if any(any(r in critical and quantity(o.receive, r) > quantity(o.give, r)
+                   for r in RESOURCES) for o in outgoing):
+            commitment_reserve = emergency_reserve
+        if not world.self.inventory.saturating_subtract(commitment_reserve).covers(committed):
             for offer in outgoing:
                 result = decision('withdraw:' + offer.offer_id, 'release stock needed for upkeep',
                                   codec.build_withdraw(**common, object_id=offer.offer_id))
@@ -156,11 +167,10 @@ class SelfSufficientStrategy:
                     return result
             return None
 
-        # Routine seeking is only the two resources we don't produce. Our
-        # specialty joins only as a survival exception, if it has itself
-        # fallen below the reserve.
+        # The default seeks specialty only in an emergency; the conservative
+        # policy also replenishes it to the routine target.
         seeking = frozenset(r for r in not_produced if quantity(needs, r) > 0)
-        if specialty in critical:
+        if specialty in critical or (self.SEEK_SPECIALTY_TO_TARGET and quantity(needs, specialty) > 0):
             seeking = seeking | {specialty}
 
         # Incoming give/receive are from the OTHER planet's perspective.
@@ -173,7 +183,8 @@ class SelfSufficientStrategy:
             if offer.is_expired_by(world.tick) or not available.covers(offer.receive):
                 continue
             after = available.minus(offer.receive) + offer.give
-            safe = all(quantity(after, r) >= min(quantity(available, r), quantity(reserve, r)) for r in RESOURCES)
+            payment_reserve = emergency_reserve if rescues_critical(offer) else reserve
+            safe = all(quantity(after, r) >= min(quantity(available, r), quantity(payment_reserve, r)) for r in RESOURCES)
             if not safe:
                 continue
             if offer.is_gift():
@@ -182,11 +193,13 @@ class SelfSufficientStrategy:
                 if result:
                     return result
                 continue
-            # Never pay in a resource we don't produce -- only our specialty
-            # may fund a paid trade (the emergency exception above still
-            # applies: if specialty itself is critical, this only relaxes
-            # what we may *seek*, not what a partner may charge us).
+            # The default pays only in specialty. Conservative specialty
+            # replenishment may use other stock under the same safety check.
             pays_only_specialty = all(r == specialty or quantity(offer.receive, r) == 0 for r in RESOURCES)
+            if self.SEEK_SPECIALTY_TO_TARGET and specialty in seeking:
+                pays_only_specialty = pays_only_specialty or (
+                    quantity(offer.receive, specialty) == 0
+                    and quantity(offer.give, specialty) > 0)
             units_in = sum(quantity(offer.give, r) for r in RESOURCES)
             units_out = sum(quantity(offer.receive, r) for r in RESOURCES)
             favorable_or_equal = units_in >= units_out
@@ -226,7 +239,7 @@ class SelfSufficientStrategy:
         if ttl <= 0:
             return None
         # Retain upkeep across the offer's lifetime, in addition to the reserve.
-        spendable = available.saturating_subtract(scaled(world.self.upkeep_per_tick, min(3 + ttl, remaining)))
+        spendable = available.saturating_subtract(scaled(world.self.upkeep_per_tick, min(self.RESERVE_TICKS + ttl, remaining)))
         busy = {o.recipient_id for o in outgoing}
         ads = [a for a in world.advertisements if a.station_id != world.self_station_id
                and a.station_id not in busy and a.is_active() and not a.is_expired_by(world.tick)
@@ -240,7 +253,7 @@ class SelfSufficientStrategy:
             urgent = need in critical
             if not urgent and not routine_ok:
                 # Recovering a critical resource is never rationed; seeking
-                # one that's merely below the routine 6-tick target is, once
+                # one that's merely below the routine target is, once
                 # the emergency reserve is all that's left of the budget.
                 continue
             # An ad is only a claim; once a partner has actually delivered
@@ -248,12 +261,12 @@ class SelfSufficientStrategy:
             confirmed = self.confirmed_suppliers_of(need)
             pool = [a for a in ads if need in a.selling and (not confirmed or a.station_id in confirmed)]
             if need == specialty:
-                # Emergency only: can't fund buying specialty with itself,
-                # so pay from whichever other resource we can spare.
+                # Can't fund buying specialty with itself, so pay from
+                # whichever other resource we can spare.
                 payment_options = tuple(sorted(not_produced, key=lambda r: r.value))
             else:
                 payment_options = (specialty,)
-            pay_pool = surplus if need in critical else spendable
+            pay_pool = available.saturating_subtract(emergency_reserve) if need in critical else spendable
             cap = 6 if need in critical else 3
             for candidate_ad in pool:
                 for payment in payment_options:
@@ -273,7 +286,7 @@ class SelfSufficientStrategy:
                         return result
         # Help advertised specialty shortages with small gifts, rotating
         # partners -- pure generosity, so it's the first thing rationed.
-        if routine_ok:
+        if routine_ok and self.can_gift(world, available, ttl):
             for ad in ads:
                 amount = min(2, quantity(spendable, specialty))
                 if specialty not in ad.seeking or amount <= 0:
@@ -295,11 +308,29 @@ class SelfSufficientStrategy:
             self.last_ad_tick = self.tick
 
 
-async def run_trading(session: ClientSession) -> WorldView:
-    strategy = SelfSufficientStrategy()
+class ConservativeTradingStrategy(SelfSufficientStrategy):
+    """Prioritize 15 ticks of supply, with a three-tick emergency floor.
+
+    Peer inventories/upkeep are absent from the wire protocol. By agreement,
+    seeking advertisements stand in for a <=3-tick emergency signal. Gifts
+    require all our resources to cover 15 ticks plus the offer lifetime.
+    """
+
+    RESERVE_TICKS = 15
+    TARGET_TICKS = 15
+    SEEK_SPECIALTY_TO_TARGET = True
+
+    def can_gift(self, world: WorldView, available: Bundle, ttl: int) -> bool:
+        remaining = max(0, world.rules.duration_ticks - world.tick)
+        return available.covers(scaled(world.self.upkeep_per_tick,
+                                      min(self.RESERVE_TICKS + ttl, remaining)))
+
+
+async def run_trading(session: ClientSession, *, conservative: bool = False) -> WorldView:
+    strategy = ConservativeTradingStrategy() if conservative else SelfSufficientStrategy()
     strategy.sent_total = len(session.world.request_results)
-    logger.info('self-sufficient trading started: station=%s specialty=%s',
-                session.world.self_station_id, session.world.self.specialty.value)
+    logger.info('trading started: policy=%s station=%s specialty=%s',
+                type(strategy).__name__, session.world.self_station_id, session.world.self.specialty.value)
     while True:
         world = session.world
         if world.phase in (pb.PHASE_FINISHED, pb.PHASE_ABORTED) or world.self.health == 0 or world.self.failed_once:
