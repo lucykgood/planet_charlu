@@ -11,6 +11,7 @@ from typing import AsyncIterator, Optional
 
 import websockets
 from websockets.asyncio.client import ClientConnection
+from websockets.exceptions import InvalidStatus
 
 from planet_charlu import codec
 from planet_charlu.config import ClientConfig
@@ -40,11 +41,29 @@ class BazaarConnection:
         await self.close()
 
     async def connect(self) -> None:
-        socket = await websockets.connect(
-            self._config.ws_url,
-            additional_headers={"Authorization": f"Bearer {self._config.token}"},
-            subprotocols=[REQUIRED_SUBPROTOCOL],
-        )
+        try:
+            socket = await websockets.connect(
+                self._config.ws_url,
+                additional_headers={"Authorization": f"Bearer {self._config.token}"},
+                subprotocols=[REQUIRED_SUBPROTOCOL],
+            )
+        except InvalidStatus as exc:
+            status = exc.response.status_code
+            if status == 401:
+                hint = (
+                    "Authentication failed. Supply the token issued for this server via "
+                    "BAZAAR_TOKEN or --token. Local validation-credentials.json tokens "
+                    "are for the local validator, not the live server. In Docker, set "
+                    "BAZAAR_TOKEN inside the container or pass it with docker compose exec -e BAZAAR_TOKEN."
+                )
+            elif status == 403:
+                hint = "Access denied. Check that your credentials are authorized for this server."
+            elif status == 400:
+                hint = "Check the assigned station and the required bazaar.protobuf.v2 subprotocol."
+            else:
+                hint = "Check the WebSocket endpoint and server availability."
+            # Don't include response bodies or headers: they may echo credentials.
+            raise ConnectionError(f"WebSocket handshake rejected (HTTP {status}). {hint}") from None
         if socket.subprotocol != REQUIRED_SUBPROTOCOL:
             negotiated = socket.subprotocol
             await socket.close()

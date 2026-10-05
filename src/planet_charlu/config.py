@@ -35,6 +35,7 @@ class ClientConfig:
     run_log_path: str | None = None
     open_browser: bool = False
     verbose: bool = False
+    conservative_trading: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -117,6 +118,12 @@ def _build_parser(env: Mapping[str, str]) -> argparse.ArgumentParser:
         help="Also log raw per-message protocol detail (DEBUG level); the default "
              "INFO level shows the per-tick dashboard and per-decision lines only",
     )
+    parser.add_argument(
+        "--conservative-trading", action=argparse.BooleanOptionalAction,
+        default=env.get("BAZAAR_CONSERVATIVE_TRADING", "false").lower() in ("true", "1", "yes"),
+        help="Target 15 ticks of supply and gift only for advertised resource emergencies "
+             "(env: BAZAAR_CONSERVATIVE_TRADING)",
+    )
     return parser
 
 
@@ -146,6 +153,7 @@ def load_config(
         run_log_path=run_log_path,
         open_browser=args.open_browser,
         verbose=args.verbose,
+        conservative_trading=args.conservative_trading,
     )
 
 

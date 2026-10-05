@@ -33,7 +33,8 @@ async def _run_client(config: ClientConfig) -> None:
                     if config.mode == "validation":
                         world = await run_sample_scenario(client_session, run_log=run_log)
                     else:
-                        world = await run_trading(client_session, run_log=run_log)
+                        world = await run_trading(client_session, run_log=run_log,
+                                                   conservative=config.conservative_trading)
                 finally:
                     await client_session.stop_pump()
     finally:

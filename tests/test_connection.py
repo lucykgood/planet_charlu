@@ -9,6 +9,7 @@ frames survive a real socket round trip.
 from __future__ import annotations
 
 import asyncio
+from http import HTTPStatus
 
 import pytest
 import websockets
@@ -83,6 +84,36 @@ async def test_subprotocol_mismatch_raises_and_closes():
         connection = BazaarConnection(config)
         with pytest.raises(SubprotocolMismatchError):
             await connection.connect()
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.parametrize("status, hint", [
+    (401, "BAZAAR_TOKEN"),
+    (403, "Access denied"),
+    (400, "subprotocol"),
+    (503, "server availability"),
+])
+async def test_handshake_rejection_explains_status_without_exposing_secrets(status, hint):
+    secret = "private-test-token"
+
+    async def reject(connection, request):
+        return connection.respond(HTTPStatus(status), secret)
+
+    async def handler(websocket):
+        pytest.fail("rejected handshake must not open a session")
+
+    server, url = await _serve(handler, process_request=reject)
+    try:
+        connection = BazaarConnection(ClientConfig(ws_url=url, token=secret, station_id="P01"))
+        with pytest.raises(ConnectionError) as excinfo:
+            await connection.connect()
+        message = str(excinfo.value)
+        assert f"HTTP {status}" in message
+        assert hint in message
+        assert secret not in message
+        assert excinfo.value.__suppress_context__
     finally:
         server.close()
         await server.wait_closed()

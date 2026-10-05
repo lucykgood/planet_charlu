@@ -112,6 +112,16 @@ Change policy thresholds and selection in `strategy.py`; change connection
 behavior in `connection.py` or `session.py`. Keep validator-specific IDs and
 expected sequencing in `scenario.py`.
 
+`--conservative-trading` (or `BAZAAR_CONSERVATIVE_TRADING=true`) selects
+`ConservativeTradingStrategy` in the same runner. The default policy is unchanged.
+The conservative policy targets and protects 15 ticks for every resource,
+including its specialty, with a three-tick emergency floor for rescue trades.
+Routine outgoing spending also protects upkeep across the offer lifetime.
+Gifting requires all resources to cover that buffer after open commitments;
+only ads seeking our specialty qualify, as an agreed proxy for a peer at three
+ticks or less. Peer inventory is not visible, so that threshold cannot be
+verified. Replenishment trades precede gifts; incoming free gifts are accepted.
+
 ## Tests and supporting files
 
 | Path | Purpose |
