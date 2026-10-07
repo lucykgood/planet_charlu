@@ -16,6 +16,7 @@ __pycache__/
 .env
 validation-credentials.json
 validation-report.json
+main-credentials.json
 
 # Structured run logs and their generated HTML summaries (auto-written per run)
 runs/

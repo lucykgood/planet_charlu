@@ -114,13 +114,25 @@ expected sequencing in `scenario.py`.
 
 `--conservative-trading` (or `BAZAAR_CONSERVATIVE_TRADING=true`) selects
 `ConservativeTradingStrategy` in the same runner. The default policy is unchanged.
-The conservative policy targets and protects 15 ticks for every resource,
-including its specialty, with a three-tick emergency floor for rescue trades.
-Routine outgoing spending also protects upkeep across the offer lifetime.
-Gifting requires all resources to cover that buffer after open commitments;
-only ads seeking our specialty qualify, as an agreed proxy for a peer at three
-ticks or less. Peer inventory is not visible, so that threshold cannot be
-verified. Replenishment trades precede gifts; incoming free gifts are accepted.
+The conservative policy has its own simpler decision loop, configured by the
+immutable `TradingPolicy(reserve_ticks=3, refill_ticks=6, target_ticks=15)`.
+It protects three ticks, refills imported resources in batches at six ticks,
+and aims for fifteen. Payments use only specialty stock. Routine proposals
+also protect upkeep across their lifetime; emergencies may spend to the floor.
+Safe fair incoming exchanges can build imported stock up to twice the target
+to help a neighbor whose needs differ from ours. Free gifts are accepted, but
+unsolicited gifts and supplier whitelists are omitted. Advertisements announce
+both imports and renew only after expiry. Nearby groups of three roster entries
+are preferred, with other advertised suppliers as fallbacks. This distributes
+demand in the test server's repeating water/food/components roster without
+requiring hard-coded station IDs or private peer inventory.
+
+`scripts/test_collective.py` runs nine real WebSocket client sessions in each of
+three local server economies. It checks final-tick completion and survival for
+every station, exports the exact scenario and outcomes, and defaults to
+one-second ticks. The sibling server is an optional test dependency, not a
+runtime client dependency. A final-phase update arriving between decision and
+send is handled by the runner as normal completion.
 
 ## Tests and supporting files
 

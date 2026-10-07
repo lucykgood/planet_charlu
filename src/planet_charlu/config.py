@@ -121,7 +121,7 @@ def _build_parser(env: Mapping[str, str]) -> argparse.ArgumentParser:
     parser.add_argument(
         "--conservative-trading", action=argparse.BooleanOptionalAction,
         default=env.get("BAZAAR_CONSERVATIVE_TRADING", "false").lower() in ("true", "1", "yes"),
-        help="Target 15 ticks of supply and gift only for advertised resource emergencies "
+        help="Refill imported resources in fair batches toward 15 ticks of supply "
              "(env: BAZAAR_CONSERVATIVE_TRADING)",
     )
     return parser

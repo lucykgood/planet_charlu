@@ -203,6 +203,35 @@ for the log's event schema and design rationale.
 
 ### Configuration
 
+To connect nine conservative clients to the organizer's server:
+
+```bash
+cp scripts/main-credentials.example.json main-credentials.json
+chmod 600 main-credentials.json
+```
+
+Edit `main-credentials.json` with the nine spreadsheet keys and their assigned
+station IDs. This filename is ignored by Git. Check the configuration first:
+
+```bash
+.venv/bin/python scripts/run_nine_clients.py --dry-run
+```
+
+Then launch all nine connections:
+
+```bash
+.venv/bin/python scripts/run_nine_clients.py
+```
+
+The launcher defaults to `wss://spaceport.edneo.com/ws`; pass `--ws-url` if the
+organizer gives a different endpoint. It forces conservative trading for every
+client and removes any inherited `BAZAAR_TOKEN` so each client reads its own
+key from the credentials file. Keys are not placed on the command line or printed.
+Logs and dashboards go into a fresh `runs/main-*` directory. Ctrl+C stops all
+clients launched by this command. Exit code zero means clients exited normally;
+check the run outcomes to establish planet survival. Server ticks and production
+are configured by the organizer, not by this launcher.
+
 CLI flags take precedence over environment variables, then defaults. If no
 nonempty token is supplied, the client reads the selected station's token from
 the credentials file's `players` list.
@@ -221,18 +250,64 @@ the credentials file's `players` list.
 
 Enable the conservative policy with `--conservative-trading` or set
 `BAZAAR_CONSERVATIVE_TRADING=true` in `.env` for Docker Compose. The default
-policy remains available when this flag is off. The conservative policy targets
-15 ticks of upkeep for every resource, subtracts open offer commitments, and
-protects 15 ticks plus the offer lifetime before routine outgoing spending.
-Emergency trades may use stock down to a three-tick floor to rescue a resource
-below that floor. All targets are capped at the run's remaining duration.
+policy remains available when this flag is off. The conservative policy uses
+three simple supply windows: protect three ticks, start replenishing an imported
+resource at six ticks, and buy enough to reach fifteen ticks. Quantities scale
+with upkeep, rather than fixed three-unit or six-unit trades. Routine proposals
+also retain specialty upkeep across the offer lifetime; emergency proposals may
+spend down to the three-tick reserve. Commitments count against available stock.
+All windows are capped at the run's remaining duration.
 
-Gifts are at most two specialty units and require every resource to cover the
-15-tick reserve plus the offer lifetime. Trades to replenish our resources take
-priority. A peer seeking our specialty is treated as a signal that it has three
-ticks or less of that resource; this is an agreed proxy, since the protocol
-does not expose peer inventories or upkeep. The client cannot verify that peer
-threshold from advertisements.
+It pays only in its specialty and proposes equal-unit exchanges. It also accepts
+fair exchanges that help neighbors, provided its reserves remain safe and the
+received resource stays within thirty ticks of stock. It accepts free gifts but
+does not send unsolicited gifts. Advertisements always announce the two imported
+resources and renew after expiry. Nearby roster entries are preferred to spread
+demand across suppliers; other advertised suppliers remain eligible. Seeking
+advertisements indicate willingness to barter, not proof of a peer's inventory.
+
+The programmatic policy API is deliberately small:
+
+```python
+from planet_charlu.strategy import ConservativeTradingStrategy, TradingPolicy
+
+strategy = ConservativeTradingStrategy(
+    TradingPolicy(reserve_ticks=3, refill_ticks=6, target_ticks=15)
+)
+action = strategy.choose(world)  # Decision or None
+if action is not None:
+    strategy.record(action)     # count it before sending action.message
+```
+
+For the existing session runner, pass the settings directly with
+`await run_trading(session, policy=TradingPolicy(...))`. Supplying `policy`
+selects conservative trading. The CLI flag uses the default settings above.
+
+### Nine-client collective trials
+
+With the sibling `spaceport_test_server` checkout available, run:
+
+```bash
+.venv/bin/python scripts/test_collective.py
+```
+
+This starts three isolated local servers and nine conservative clients per
+server. Each trial lasts 300 one-second ticks. Scenarios, client diagnostics,
+and per-planet results are saved in a new `runs/collective-*` directory. A trial
+passes only if all nine clients reach the final tick alive without a permanent
+failure. The script exits nonzero if any trial fails. Use `--surplus 25` to run
+just that economy, `--ticks 600` for a longer trial, or `--tick-ms 100` for faster
+diagnosis. Accelerated trials do not verify one-second pacing. An alternative
+checkout can be supplied with `--server-root /path/to/spaceport_test_server`.
+
+Every planet consumes four units of **each** resource per tick. With three
+producers per resource, production of 18, 15, or 12 specialty units per planet
+gives 50%, 25%, or zero surplus respectively. Production of five with these
+upkeep values is a deficit, regardless of the scenario's filename. Opening
+inventory is 120 units of each resource. These are local test settings, not
+verified settings for the Directorate's server; match its inventory, production,
+limits, and duration when supplied. The local server ignores authentication;
+spreadsheet keys must still be tested against the organizer's endpoint.
 
 Python does not automatically load `.env`; Docker Compose loads it for the app
 container. Keep tokens and validator output local;

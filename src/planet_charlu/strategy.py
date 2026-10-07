@@ -22,7 +22,7 @@ from planet_charlu.logging_utils import (
     format_status_report,
     humanize_result_code,
 )
-from planet_charlu.session import ClientSession
+from planet_charlu.session import ClientSession, NotRunningError
 from planet_charlu.structured_log import RunLog
 
 logger = logging.getLogger(__name__)
@@ -340,27 +340,179 @@ class SelfSufficientStrategy:
             self.last_ad_tick = self.tick
 
 
-class ConservativeTradingStrategy(SelfSufficientStrategy):
-    """Prioritize 15 ticks of supply, with a three-tick emergency floor.
+@dataclass(frozen=True)
+class TradingPolicy:
+    """Supply windows in simulation ticks, independent of clock speed."""
 
-    Peer inventories/upkeep are absent from the wire protocol. By agreement,
-    seeking advertisements stand in for a <=3-tick emergency signal. Gifts
-    require all our resources to cover 15 ticks plus the offer lifetime.
+    reserve_ticks: int = 3
+    refill_ticks: int = 6
+    target_ticks: int = 15
+
+    def __post_init__(self) -> None:
+        values = (self.reserve_ticks, self.refill_ticks, self.target_ticks)
+        if any(type(value) is not int for value in values) or not 0 < self.reserve_ticks < self.refill_ticks < self.target_ticks:
+            raise ValueError("policy requires 0 < reserve_ticks < refill_ticks < target_ticks")
+
+
+class ConservativeTradingStrategy:
+    """Keep a supply buffer; exchange specialty stock at equal unit prices.
+
+    Refill in batches, accept useful fair exchanges to help neighbors, and
+    distribute proposals among advertised suppliers. No gifts or supplier
+    whitelist are needed when all nine planets use this policy.
     """
 
-    RESERVE_TICKS = 15
-    TARGET_TICKS = 15
-    SEEK_SPECIALTY_TO_TARGET = True
+    def __init__(self, policy: TradingPolicy | None = None) -> None:
+        self.policy = policy or TradingPolicy()
+        self.tick = -1
+        self.attempted: set[str] = set()
+        self.sent_this_tick = 0
+        self.sent_total = 0
+        self.retry_tick = 0
+        self.partner_turn: dict[str, int] = {}
+        self.last_offer_review: list[tuple[Offer, str]] = []
 
-    def can_gift(self, world: WorldView, available: Bundle, ttl: int) -> bool:
-        remaining = max(0, world.rules.duration_ticks - world.tick)
-        return available.covers(scaled(world.self.upkeep_per_tick,
-                                      min(self.RESERVE_TICKS + ttl, remaining)))
+    def record(self, action: Decision) -> None:
+        self.attempted.add(action.key)
+        self.sent_this_tick += 1
+        self.sent_total += 1
+        if action.key.startswith('partner:'):
+            self.partner_turn[action.key.split(':', 1)[1]] = self.sent_total
+
+    def choose(self, world: WorldView) -> Decision | None:
+        self.last_offer_review = []
+        if world.tick != self.tick:
+            self.tick = world.tick
+            self.attempted.clear()
+            self.sent_this_tick = 0
+        rules = world.rules
+        used = max(self.sent_total, len(world.request_results))
+        if (not world.is_running() or world.self.health == 0 or world.self.failed_once
+                or world.tick < self.retry_tick
+                or self.sent_this_tick >= rules.new_commands_per_station_per_tick
+                or used >= rules.max_request_records_per_station):
+            return None
+        remaining = max(0, rules.duration_ticks - world.tick)
+        if not remaining:
+            return None
+        upkeep = world.self.upkeep_per_tick
+        specialty = world.self.specialty
+        imported = frozenset(RESOURCES) - {specialty}
+        reserve = scaled(upkeep, min(self.policy.reserve_ticks, remaining))
+        target = scaled(upkeep, min(self.policy.target_ticks, remaining))
+        outgoing = [o for o in world.open_offers_from_me() if not o.is_expired_by(world.tick)]
+        committed = Bundle.zero()
+        for offer in outgoing:
+            committed += offer.give
+        available = world.self.inventory.saturating_subtract(committed)
+        common = dict(run_id=world.run_id, request_id=generate_request_id())
+
+        def decision(key: str, reason: str, message: pb.ClientMessage) -> Decision | None:
+            if key in self.attempted or len(codec.encode_client_message(message)) > rules.max_command_bytes:
+                return None
+            return Decision(key, reason, message)
+
+        if not world.self.inventory.saturating_subtract(reserve).covers(committed):
+            for offer in outgoing:
+                action = decision('withdraw:' + offer.offer_id, 'release stock needed for upkeep',
+                                  codec.build_withdraw(**common, object_id=offer.offer_id))
+                if action:
+                    return action
+            return None
+
+        # Help the shortest supply first, rather than accepting tiny gifts
+        # ahead of a larger trade that would prevent a shortage.
+        def urgency(offer: Offer) -> float:
+            return min((quantity(available, r) / max(1, quantity(upkeep, r))
+                        for r in RESOURCES if quantity(offer.give, r) > quantity(offer.receive, r)),
+                       default=float('inf'))
+
+        for offer in sorted(world.open_offers_to_me(), key=lambda o: (urgency(o), o.created_tick, o.offer_id)):
+            note = ''
+            if offer.is_expired_by(world.tick):
+                note = 'expired'
+            elif not available.covers(offer.receive):
+                note = 'insufficient stock to cover what it asks'
+            else:
+                after = available.minus(offer.receive) + offer.give
+                safe = all(quantity(after, r) >= min(quantity(available, r), quantity(reserve, r))
+                           for r in RESOURCES)
+                fair = sum(quantity(offer.give, r) for r in RESOURCES) >= sum(quantity(offer.receive, r) for r in RESOURCES)
+                specialty_payment = all(r == specialty or quantity(offer.receive, r) == 0 for r in RESOURCES)
+                useful = any(r in imported and quantity(offer.give, r) > quantity(offer.receive, r)
+                             and quantity(after, r) <= 2 * quantity(target, r) for r in RESOURCES)
+                if not safe:
+                    note = 'would breach the upkeep reserve'
+                elif not offer.is_gift() and not specialty_payment:
+                    note = 'would require payment beyond our specialty'
+                elif not fair:
+                    note = 'unfavorable: would give more than we receive'
+                elif not offer.is_gift() and not useful:
+                    note = 'already have enough of the offered resource'
+                else:
+                    action = decision('accept:' + offer.offer_id, 'accept useful fair exchange or free gift',
+                                      codec.build_accept(**common, offer_id=offer.offer_id))
+                    if action:
+                        self.last_offer_review.append((offer, 'accepted'))
+                        return action
+                    note = 'already attempted this tick, or message too large'
+            self.last_offer_review.append((offer, note))
+
+        ttl = min(5, rules.max_offer_ttl_ticks, remaining)
+        specialty_buffer = quantity(upkeep, specialty) * min(self.policy.reserve_ticks + ttl, remaining)
+        spendable = max(0, quantity(available, specialty) - specialty_buffer)
+        selling = {specialty} if spendable else set()
+        # Always announce the two resources we import. An advertisement is
+        # a willingness to barter, not a claim that a neighbor is in distress.
+        own_ad = next((a for a in world.advertisements if a.posted_by(world.self_station_id)
+                       and a.is_active() and not a.is_expired_by(world.tick)), None)
+        routine_ok = rules.max_request_records_per_station - used > 4
+        if own_ad is None and routine_ok and (selling or imported):
+            ad_ttl = min(10, rules.max_publication_ttl_ticks, remaining)
+            if ad_ttl > 0:
+                action = decision('advertise', 'advertise specialty for fair resource exchanges',
+                    codec.build_advertise(**common, selling=sorted(selling, key=lambda r: r.value),
+                                          seeking=sorted(imported, key=lambda r: r.value),
+                                          expires_tick=world.tick + ad_ttl))
+                if action:
+                    return action
+        if ttl <= 0 or len(outgoing) >= rules.max_open_outgoing_offers:
+            return None
+        busy = {o.recipient_id for o in outgoing}
+        suppliers = [a for a in world.advertisements if a.station_id != world.self_station_id
+                     and a.station_id not in busy and a.is_active() and not a.is_expired_by(world.tick)
+                     and (not world.directory or a.station_id in world.directory)]
+        # Prefer nearby entries in the roster to spread demand. If no nearby
+        # station sells the needed resource, any advertised supplier qualifies.
+        roster = sorted(set(world.directory) | {world.self_station_id}
+                        | {a.station_id for a in suppliers})
+        group = roster.index(world.self_station_id) // len(RESOURCES)
+        suppliers.sort(key=lambda a: (roster.index(a.station_id) // len(RESOURCES) != group,
+                                      self.partner_turn.get(a.station_id, -1), a.station_id))
+        for need in sorted(imported, key=lambda r: (quantity(available, r) / max(1, quantity(upkeep, r)), r.value)):
+            if quantity(available, need) > quantity(upkeep, need) * min(self.policy.refill_ticks, remaining):
+                continue
+            urgent = quantity(available, need) < quantity(reserve, need)
+            if not routine_ok and not urgent:
+                continue
+            amount = min(quantity(target, need) - quantity(available, need),
+                         max(0, quantity(available, specialty) - quantity(reserve, specialty)) if urgent else spendable)
+            if amount <= 0:
+                continue
+            for supplier in suppliers:
+                if need in supplier.selling and specialty in supplier.seeking:
+                    action = decision('partner:' + supplier.station_id, 'refill shortest supply with a fair batch exchange',
+                        codec.build_offer(**common, recipient_id=supplier.station_id,
+                                          give=bundle_of(specialty, amount), receive=bundle_of(need, amount),
+                                          expires_tick=world.tick + ttl))
+                    if action:
+                        return action
+        return None
 
 
 async def run_trading(session: ClientSession, run_log: RunLog | None = None, *,
-                      conservative: bool = False) -> WorldView:
-    strategy = ConservativeTradingStrategy() if conservative else SelfSufficientStrategy()
+                      conservative: bool = False, policy: TradingPolicy | None = None) -> WorldView:
+    strategy = ConservativeTradingStrategy(policy) if conservative or policy is not None else SelfSufficientStrategy()
     strategy.sent_total = len(session.world.request_results)
     logger.info('trading started: policy=%s station=%s specialty=%s',
                 type(strategy).__name__, session.world.self_station_id, session.world.self.specialty.value)
@@ -413,6 +565,10 @@ async def run_trading(session: ClientSession, run_log: RunLog | None = None, *,
             # Reconcile server inventory/commitments before every next decision.
             # Never blindly resend a command whose settlement is uncertain.
             await session.sync(timeout=15)
+        except NotRunningError:
+            # A final snapshot can arrive between choosing and sending.
+            if session.world.phase not in (pb.PHASE_FINISHED, pb.PHASE_ABORTED):
+                raise
         except asyncio.TimeoutError as exc:
             if run_log:
                 run_log.run_ended(session.world, reason='command or sync timeout')
