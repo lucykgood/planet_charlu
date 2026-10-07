@@ -402,15 +402,196 @@ class RestrainedTradingStrategy(BaseStrategy):
                                       min(self.reserve_ticks(world) + ttl, remaining)))
 
 
+class SimplifiedTradingStrategy(BaseStrategy):
+    """Two moves: refill below 15 ticks toward 25; share above 25.
+
+    Uses BaseStrategy's attempt accounting, but no supplier learning or
+    adaptive thresholds. Pending deliveries block duplicate purchases without
+    being counted as stock. Payments retain five ticks through offer expiry.
+    """
+
+    RESERVE_TICKS = 5
+    REORDER_TICKS = 15
+    TARGET_TICKS = 25
+    OFFER_TTL_TICKS = 5
+
+    def reserve_ticks(self, world: WorldView) -> int:
+        return self.RESERVE_TICKS
+
+    def target_ticks(self, world: WorldView) -> int:
+        return self.TARGET_TICKS
+
+    def urgency_ticks(self, world: WorldView) -> int:
+        return self.REORDER_TICKS
+
+    def choose(self, world: WorldView) -> Decision | None:
+        self.last_offer_review = []
+        if self.tick != world.tick:
+            self.tick = world.tick
+            self.attempted.clear()
+            self.sent_this_tick = 0
+        rules = world.rules
+        remaining = max(0, rules.duration_ticks - world.tick)
+        if (not world.is_running() or world.self.health == 0 or world.self.failed_once
+                or not remaining or world.tick < self.retry_tick
+                or self.sent_this_tick >= rules.new_commands_per_station_per_tick
+                or max(self.sent_total, len(world.request_results)) >= rules.max_request_records_per_station):
+            return None
+
+        upkeep = world.self.upkeep_per_tick
+        specialty = world.self.specialty
+        outgoing = [o for o in world.open_offers_from_me() if not o.is_expired_by(world.tick)]
+        committed = Bundle.zero()
+        pending = set()
+        for offer in outgoing:
+            committed += offer.give
+            pending.update(r for r in RESOURCES if quantity(offer.receive, r) > quantity(offer.give, r))
+        available = world.self.inventory.saturating_subtract(committed)
+        horizon = max((o.expires_tick - world.tick for o in outgoing), default=0)
+        guard = scaled(upkeep, min(self.RESERVE_TICKS + horizon, remaining))
+        target = scaled(upkeep, min(self.TARGET_TICKS, remaining))
+        reorder = scaled(upkeep, min(self.REORDER_TICKS, remaining))
+        seeking = frozenset(r for r in RESOURCES if quantity(available, r) < quantity(reorder, r))
+        common = dict(run_id=world.run_id, request_id=generate_request_id())
+
+        def decision(key, reason, message):
+            if key in self.attempted or len(codec.encode_client_message(message)) > rules.max_command_bytes:
+                return None
+            return Decision(key, reason, message)
+
+        # Safety applies to promised payments, regardless of anticipated income.
+        if (not world.self.inventory.covers(committed)
+                or any(quantity(committed, r) > 0 and quantity(available, r) < quantity(guard, r)
+                       for r in RESOURCES)):
+            for offer in sorted(outgoing, key=lambda o: -sum(quantity(o.give, r) for r in RESOURCES)):
+                action = decision('withdraw:' + offer.offer_id, 'release unsafe payment commitment',
+                                  codec.build_withdraw(**common, object_id=offer.offer_id))
+                if action:
+                    return action
+            return None
+
+        def coverage(resource):
+            rate = quantity(upkeep, resource)
+            return quantity(available, resource) / rate if rate else math.inf
+
+        wanted = sorted(seeking, key=coverage)
+        incoming = sorted(world.open_offers_to_me(), key=lambda o: (
+            not o.is_gift(),
+            min((coverage(r) for r in RESOURCES if quantity(o.give, r) > quantity(o.receive, r)),
+                default=math.inf), o.created_tick, o.offer_id))
+        for offer in incoming:
+            note = None
+            if offer.is_expired_by(world.tick):
+                note = 'expired'
+            elif not available.covers(offer.receive):
+                note = 'insufficient stock to cover what it asks'
+            elif not offer.is_gift():
+                after = available.minus(offer.receive) + offer.give
+                safe = all(quantity(after, r) >= min(quantity(available, r), quantity(guard, r))
+                           for r in RESOURCES)
+                specialty_payment = all(r == specialty or quantity(offer.receive, r) == 0 for r in RESOURCES)
+                # Recover specialty only by spending other resources above target.
+                spare_payment = (specialty in seeking and quantity(offer.give, specialty) > 0
+                                 and quantity(offer.receive, specialty) == 0
+                                 and available.saturating_subtract(target).covers(offer.receive))
+                useful = any(quantity(available, r) < quantity(target, r)
+                             and quantity(offer.give, r) > quantity(offer.receive, r) for r in RESOURCES)
+                if not safe:
+                    note = 'would breach the upkeep reserve through pending offer expiry'
+                elif not (specialty_payment or spare_payment):
+                    note = 'would require payment beyond safe specialty or spare stock'
+                elif sum(quantity(offer.give, r) for r in RESOURCES) < sum(quantity(offer.receive, r) for r in RESOURCES):
+                    note = 'unfavorable: would give more than we receive'
+                elif not useful:
+                    note = "doesn't replenish a resource below target"
+            if note is None:
+                action = decision('accept:' + offer.offer_id,
+                                  'accept free gift' if offer.is_gift() else 'accept safe replenishment trade',
+                                  codec.build_accept(**common, offer_id=offer.offer_id))
+                if action:
+                    self.last_offer_review.append((offer, 'accepted'))
+                    return action
+                note = 'already attempted this tick, or message too large'
+            self.last_offer_review.append((offer, note))
+
+        ttl = min(self.OFFER_TTL_TICKS, rules.max_offer_ttl_ticks, remaining)
+        payment_guard = scaled(upkeep, min(self.RESERVE_TICKS + max(horizon, ttl), remaining))
+        spendable = available.saturating_subtract(payment_guard)
+        busy = {o.recipient_id for o in outgoing}
+        ads = [a for a in world.advertisements if a.station_id != world.self_station_id
+               and a.station_id not in busy and a.is_active() and not a.is_expired_by(world.tick)
+               and (not world.directory or a.station_id in world.directory)]
+        ads.sort(key=lambda a: (self.partner_turn.get(a.station_id, -1), a.station_id))
+        can_offer = ttl > 0 and len(outgoing) < rules.max_open_outgoing_offers
+
+        # Move 1: refill the shortest supply, without ordering it twice.
+        if can_offer:
+            for need in wanted:
+                if need in pending:
+                    continue
+                payments = (specialty,) if need != specialty else tuple(
+                    sorted((r for r in RESOURCES if r != specialty), key=lambda r: -coverage(r)))
+                for ad in ads:
+                    if need not in ad.selling:
+                        continue
+                    for payment in payments:
+                        if payment not in ad.seeking:
+                            continue
+                        capacity = quantity(spendable, payment)
+                        if need == specialty:
+                            capacity = min(capacity, quantity(available.saturating_subtract(target), payment))
+                        amount = min(quantity(target, need) - quantity(available, need), capacity)
+                        if amount > 0:
+                            action = decision('partner:' + ad.station_id,
+                                f'refill {need.value} toward 25 ticks with {ad.station_id}',
+                                codec.build_offer(**common, recipient_id=ad.station_id,
+                                    give=bundle_of(payment, amount), receive=bundle_of(need, amount),
+                                    expires_tick=world.tick + ttl))
+                            if action:
+                                return action
+
+        # Public listings support both moves; renew only on expiry or a change.
+        selling = frozenset({specialty}) if quantity(spendable, specialty) > 0 else frozenset()
+        own_ad = next((a for a in world.advertisements if a.posted_by(world.self_station_id)
+                       and a.is_active() and not a.is_expired_by(world.tick)), None)
+        if (selling or seeking) and (own_ad is None or own_ad.expires_tick <= world.tick + 1
+                                    or own_ad.selling != selling or own_ad.seeking != seeking):
+            ad_ttl = min(10, rules.max_publication_ttl_ticks, remaining)
+            if ad_ttl > 0:
+                action = decision('advertise', 'publish surplus and replenishment needs',
+                    codec.build_advertise(**common, selling=sorted(selling, key=lambda r: r.value),
+                        seeking=sorted(seeking, key=lambda r: r.value), expires_tick=world.tick + ad_ttl))
+                if action:
+                    return action
+
+        # Move 2: small gifts, only while every resource stays at the target.
+        if can_offer:
+            amount = min(2, quantity(spendable, specialty),
+                         quantity(available.saturating_subtract(target), specialty))
+            if amount > 0 and available.minus(bundle_of(specialty, amount)).covers(target):
+                for ad in ads:
+                    if specialty in ad.seeking:
+                        action = decision('partner:' + ad.station_id,
+                            f'share surplus {specialty.value} while retaining 25 ticks',
+                            codec.build_offer(**common, recipient_id=ad.station_id,
+                                give=bundle_of(specialty, amount), receive=Bundle.zero(),
+                                expires_tick=world.tick + ttl))
+                        if action:
+                            return action
+        return None
+
+
 async def run_trading(session: ClientSession, run_log: RunLog | None = None, *,
-                      conservative: bool = False) -> WorldView:
+                      conservative: bool = False, simplified: bool = False) -> WorldView:
     async with LiveSummaryRenderer(run_log) as renderer:
-        return await _run_trading(session, run_log, conservative=conservative, renderer=renderer)
+        return await _run_trading(session, run_log, conservative=conservative,
+                                  simplified=simplified, renderer=renderer)
 
 
 async def _run_trading(session: ClientSession, run_log: RunLog | None, *,
-                       conservative: bool, renderer: LiveSummaryRenderer) -> WorldView:
-    strategy = RestrainedTradingStrategy() if conservative else BaseStrategy()
+                       conservative: bool, simplified: bool, renderer: LiveSummaryRenderer) -> WorldView:
+    strategy = (SimplifiedTradingStrategy() if simplified else
+                RestrainedTradingStrategy() if conservative else BaseStrategy())
     strategy.sent_total = len(session.world.request_results)
     logger.info('trading started: policy=%s station=%s specialty=%s',
                 type(strategy).__name__, session.world.self_station_id, session.world.self.specialty.value)
@@ -464,7 +645,7 @@ async def _run_trading(session: ClientSession, run_log: RunLog | None, *,
                 run_log.command_result(world, key=action.key, outcome=outcome)
             if outcome.code == pb.RESULT_CODE_RATE_LIMITED:
                 strategy.retry_tick = max(world.tick + 1, outcome.retry_after_tick or 0)
-            if outcome.ok and outcome.object_id and action.message.WhichOneof('message') == 'offer':
+            if not simplified and outcome.ok and outcome.object_id and action.message.WhichOneof('message') == 'offer':
                 if not Bundle.from_wire(action.message.offer.body.receive).is_zero():
                     strategy.pending_trade_times[outcome.object_id] = started
             # A push must include this result's processed version, not merely

@@ -20,12 +20,14 @@ def test_main_exits_with_status_1_on_config_error(monkeypatch):
 
 @pytest.mark.parametrize("mode", ["trade", "validation"])
 @pytest.mark.parametrize("conservative", [False, True])
-def test_main_runs_session_with_resolved_config(monkeypatch, mode, conservative):
+@pytest.mark.parametrize("simplified", [False, True])
+def test_main_runs_session_with_resolved_config(monkeypatch, mode, conservative, simplified):
     config = ClientConfig(ws_url="ws://x/ws", token="t", station_id="P01")
     monkeypatch.setattr(main_module, "load_config", lambda: config)
 
     config.mode = mode
     config.conservative_trading = conservative
+    config.simplified_trading = simplified
     seen = {}
 
     class FakeConnection:
@@ -60,6 +62,7 @@ def test_main_runs_session_with_resolved_config(monkeypatch, mode, conservative)
     assert seen["config"] is config
     if mode == "trade":
         assert seen["conservative"] is conservative
+        assert seen["simplified"] is simplified
 
 
 def test_main_writes_html_summary_automatically_when_run_log_path_set(monkeypatch, tmp_path):

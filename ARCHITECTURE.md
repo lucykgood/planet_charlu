@@ -69,6 +69,23 @@ Paths below are relative to `src/planet_charlu/`.
 
 ## Trading policy
 
+`--simplified-trading` selects `SimplifiedTradingStrategy`, taking precedence
+over `--restrained-trading`. It shares attempt accounting and the trading runner
+with the existing policies, but does not learn suppliers or adapt stock targets
+to latency. Its two moves are replenishment below 15 ticks toward 25, followed by
+small specialty gifts only when all resources retain 25 ticks. Purchases precede
+advertising; incoming gifts and safe favorable-or-equal trades precede purchases.
+Specialty replenishment can spend other stock only above the 25-tick target.
+
+Open payments are subtracted before every decision. Five ticks of upkeep are
+protected through the latest outstanding expiry; unsafe payment commitments are
+withdrawn first. Expected receipts only suppress duplicate purchases, never
+fund upkeep or payments. There is at most one outgoing purchase per resource,
+and partner rotation allows replacement suppliers after expiry. Offers last
+up to five ticks; all buffers are capped by remaining duration and scaled by
+actual upkeep. The existing server-limit checks, backoff, command correlation,
+snapshot reconciliation, and logging remain in force.
+
 `BaseStrategy.choose(world)` returns at most one `Decision`. The
 runner calls `record()` before sending, so even rejected attempts count
 toward local limits. It only trades for the two resources this station does
@@ -124,7 +141,7 @@ only ads seeking our specialty qualify, as an agreed proxy for a peer at three
 ticks or less. Peer inventory is not visible, so that threshold cannot be
 verified. Replenishment trades precede gifts; incoming free gifts are accepted.
 
-Both policies preserve `tick_duration_ms` and adapt their stock thresholds to
+The default and restrained policies preserve `tick_duration_ms` and adapt their stock thresholds to
 the largest recent observed command/reconciliation or outgoing settlement delay
 (a rolling 32-sample window with a one-second minimum). Converted to `L` ticks,
 reserve = max(policy minimum, 3 + 2*(L-1)), target = max(policy minimum, 3 + 3*L),
@@ -155,6 +172,7 @@ record simulation speed.
 | `tests/test_connection.py`, `tests/test_session.py` | Local WebSocket transport, handshake, phase gating, and session updates. |
 | `tests/test_scenario.py` | Scripted ten-step validator exchange and failure paths. |
 | `tests/test_strategy.py` | Reserve protection, policy limits, partner rotation, and a simulated nine-planet exchange. |
+| `tests/test_simplified_trading.py` | Two-move policy, commitment and gift safety, duplicate suppression, supplier replacement, flag selection, and 120 virtual one-second ticks with delayed settlement and no incoming gifts. |
 | `tests/test_speed_aware_trading.py` | Speed changes, latency adaptation, urgent priority, settled-snapshot reuse, and background rendering. |
 | `scripts/check_validation.py` | Manual assertions against a fresh real validator exercise. |
 | `scripts/generate_run_summary.py` | Thin CLI wrapper around `planet_charlu.run_summary.write_summary` for regenerating an HTML summary by hand; standalone (adds `src/` to `sys.path` itself, no env setup needed). |

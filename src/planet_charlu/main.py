@@ -34,7 +34,8 @@ async def _run_client(config: ClientConfig) -> None:
                         world = await run_sample_scenario(client_session, run_log=run_log)
                     else:
                         world = await run_trading(client_session, run_log=run_log,
-                                                   conservative=config.conservative_trading)
+                                                   conservative=config.conservative_trading,
+                                                   simplified=config.simplified_trading)
                 finally:
                     await client_session.stop_pump()
     finally:

@@ -220,6 +220,42 @@ the credentials file's `players` list.
 | Open HTML summary in a browser on first write | `--no-open-browser` (to disable) | None | on |
 | Verbose (raw protocol log lines) | `--verbose` / `-v` | None | off |
 | Restrained trading | `--restrained-trading` / `--no-restrained-trading` | `BAZAAR_CONSERVATIVE_TRADING` (`true`, `1`, or `yes` enables) | Off |
+| Simplified trading | `--simplified-trading` / `--no-simplified-trading` | `BAZAAR_SIMPLIFIED_TRADING` (`true`, `1`, or `yes` enables) | Off |
+
+Enable the two-move policy with:
+
+```bash
+python -m planet_charlu.main --mode trade --simplified-trading
+```
+
+Or set `BAZAAR_SIMPLIFIED_TRADING=true` in `.env` for Docker Compose, then
+recreate the app container. `--no-simplified-trading` overrides the environment.
+Simplified trading takes precedence when restrained trading is also enabled.
+
+The simplified policy has two moves:
+
+1. **Refill what is low:** below 15 ticks of upkeep, offer a 1:1 specialty trade
+   toward 25 ticks, prioritizing the shortest supply. Accept free gifts and safe,
+   favorable-or-equal replenishment trades. If specialty itself is low, payment
+   may come from another resource's surplus above 25 ticks.
+2. **Share when secure:** offer up to two specialty units only when every
+   resource still covers 25 ticks after existing commitments and the new gift.
+
+Payments protect five ticks of upkeep through pending offer expiry. Open outgoing
+payments are subtracted from stock; anticipated deliveries never count as usable
+inventory. At most one outgoing purchase per resource is pending at a time. Offers
+last five ticks, capped by server limits and remaining duration. Expired offers
+allow another compatible advertiser to be tried; there is no permanent supplier
+restriction. Replenishment offers precede advertisement refreshes and gifts.
+All stock thresholds scale with upkeep and are capped by the run's remaining
+ticks. The simplified thresholds are fixed in ticks, intended for one-second
+ticks; they do not adapt to measured latency or changing simulation speed.
+
+The automated survival test uses 120 virtual one-second ticks with compressed
+wall time, finite supplier stock, one nonresponding supplier, and one- or
+three-tick settlement delays, without incoming gifts. It verifies the runner
+finishes at health 100. A coordinated live match remains necessary to verify
+actual one-second pacing, production, and other teams' willingness to trade.
 
 Enable the restrained policy with `--restrained-trading` or set
 `BAZAAR_CONSERVATIVE_TRADING=true` in `.env` for Docker Compose. The default
@@ -237,7 +273,7 @@ ticks or less of that resource; this is an agreed proxy, since the protocol
 does not expose peer inventories or upkeep. The client cannot verify that peer
 threshold from advertisements.
 
-Both trading policies adapt to simulation speed using the server's
+The default and restrained trading policies adapt to simulation speed using the server's
 `tick_duration_ms` and the largest of their 32 recent command/reconciliation
 and observed outgoing-trade settlement delays, with a one-second starting
 allowance. If that allowance spans `L` ticks, the reserve is at least

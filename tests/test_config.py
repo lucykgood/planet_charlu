@@ -132,3 +132,11 @@ def test_restrained_trading_flag_and_environment():
     env = {"BAZAAR_TOKEN": "t", "BAZAAR_CONSERVATIVE_TRADING": "true"}
     assert load_config([], env).conservative_trading
     assert not load_config(["--no-restrained-trading"], env).conservative_trading
+
+
+def test_simplified_trading_flag_and_environment():
+    assert not load_config(["--token", "t"], {}).simplified_trading
+    assert load_config(["--token", "t", "--simplified-trading"], {}).simplified_trading
+    env = {"BAZAAR_TOKEN": "t", "BAZAAR_SIMPLIFIED_TRADING": "yes"}
+    assert load_config([], env).simplified_trading
+    assert not load_config(["--no-simplified-trading"], env).simplified_trading

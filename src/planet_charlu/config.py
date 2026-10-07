@@ -36,6 +36,7 @@ class ClientConfig:
     open_browser: bool = False
     verbose: bool = False
     conservative_trading: bool = False
+    simplified_trading: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -124,6 +125,13 @@ def _build_parser(env: Mapping[str, str]) -> argparse.ArgumentParser:
         help="Target 15 ticks of supply and gift only for advertised resource emergencies "
              "(env: BAZAAR_CONSERVATIVE_TRADING)",
     )
+    parser.add_argument(
+        "--simplified-trading", action=argparse.BooleanOptionalAction,
+        default=env.get("BAZAAR_SIMPLIFIED_TRADING", "false").lower() in ("true", "1", "yes"),
+        help="Refill below 15 ticks toward 25; share only when all resources remain "
+             "at or above 25 ticks. Takes precedence over --restrained-trading "
+             "(env: BAZAAR_SIMPLIFIED_TRADING)",
+    )
     return parser
 
 
@@ -154,6 +162,7 @@ def load_config(
         open_browser=args.open_browser,
         verbose=args.verbose,
         conservative_trading=args.conservative_trading,
+        simplified_trading=args.simplified_trading,
     )
 
 
