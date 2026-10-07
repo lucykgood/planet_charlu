@@ -22,6 +22,7 @@ def test_from_state_maps_top_level_fields():
     assert world.tick == 3
     assert world.self_station_id == "P01"
     assert world.self.inventory == Bundle(30, 30, 30)
+    assert world.rules.tick_duration_ms == state.rules.tick_duration_ms
 
 
 def test_is_running_reflects_phase():

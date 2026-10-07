@@ -69,7 +69,7 @@ Paths below are relative to `src/planet_charlu/`.
 
 ## Trading policy
 
-`SelfSufficientStrategy.choose(world)` returns at most one `Decision`. The
+`BaseStrategy.choose(world)` returns at most one `Decision`. The
 runner calls `record()` before sending, so even rejected attempts count
 toward local limits. It only trades for the two resources this station does
 not itself produce, never gives either of them away, and pays only in its
@@ -82,9 +82,9 @@ selection runs in this order:
 2. Accept free gifts outright; accept a favorable-or-equal paid trade for a
    resource we need if the routine budget allows, or unconditionally if it
    rescues a resource below the three-tick reserve ("critical").
-3. Publish or refresh a specialty-surplus/unproduced-resource-needs
-   advertisement, budget permitting.
-4. Seek reciprocal trades, prioritizing critical resources first, then the
+3. Seek urgent reciprocal trades before advertising, then publish or refresh
+   a specialty-surplus/unproduced-resource-needs advertisement, budget permitting.
+4. Seek routine reciprocal trades, prioritizing the
    shortest supply. A resource with a confirmed supplier (a station that has
    actually delivered it, per settled `world.transactions`) only trades with
    that roster; one with no confirmed supplier yet still scans advertisements
@@ -105,22 +105,42 @@ once it runs low, so a safety withdrawal, a gift accept, or a critical
 rescue is never the thing that runs out of budget. Server rules bound
 message size, expiry, outgoing offers, and command counts. Rate-limit
 results postpone further attempts until the retry tick. After each result
-the runner requests a fresh snapshot before deciding again; it does not
+the runner reuses a complete pushed snapshot whose version includes the result,
+or which contains its request record. Otherwise it syncs and waits for an
+applied result before deciding again; it does not
 retry uncertain commands automatically.
 
 Change policy thresholds and selection in `strategy.py`; change connection
 behavior in `connection.py` or `session.py`. Keep validator-specific IDs and
 expected sequencing in `scenario.py`.
 
-`--conservative-trading` (or `BAZAAR_CONSERVATIVE_TRADING=true`) selects
-`ConservativeTradingStrategy` in the same runner. The default policy is unchanged.
-The conservative policy targets and protects 15 ticks for every resource,
+`--restrained-trading` (or `BAZAAR_CONSERVATIVE_TRADING=true`) selects
+`RestrainedTradingStrategy` in the same runner.
+The conservative policy targets and protects at least 15 ticks for every resource,
 including its specialty, with a three-tick emergency floor for rescue trades.
 Routine outgoing spending also protects upkeep across the offer lifetime.
 Gifting requires all resources to cover that buffer after open commitments;
 only ads seeking our specialty qualify, as an agreed proxy for a peer at three
 ticks or less. Peer inventory is not visible, so that threshold cannot be
 verified. Replenishment trades precede gifts; incoming free gifts are accepted.
+
+Both policies preserve `tick_duration_ms` and adapt their stock thresholds to
+the largest recent observed command/reconciliation or outgoing settlement delay
+(a rolling 32-sample window with a one-second minimum). Converted to `L` ticks,
+reserve = max(policy minimum, 3 + 2*(L-1)), target = max(policy minimum, 3 + 3*L),
+and urgent supply threshold = 2*L + 1. Rescue spending keeps a three-tick floor.
+Batches scale with needed-resource upkeep and latency, with conservative routine
+batches of up to eight upkeep ticks before latency scaling. Offer TTL is
+max(5, 2*L+1), capped by public rules and remaining duration. Stock targets and
+payments remain capped by remaining duration, needs, and available inventory.
+`CommandOutcome` keeps `processed_version`/`processed_tick` so `session.reconcile`
+can distinguish a settled push from an unrelated newer tick snapshot.
+
+`LiveSummaryRenderer` runs report generation in a worker thread, coalesces tick
+refresh requests, and throttles live rendering to one-second intervals. Shutdown
+waits for the worker before the final render and log closure. `trade_timing`
+events expose command/reconciliation latency and adaptive thresholds; tick events
+record simulation speed.
 
 ## Tests and supporting files
 
@@ -135,6 +155,7 @@ verified. Replenishment trades precede gifts; incoming free gifts are accepted.
 | `tests/test_connection.py`, `tests/test_session.py` | Local WebSocket transport, handshake, phase gating, and session updates. |
 | `tests/test_scenario.py` | Scripted ten-step validator exchange and failure paths. |
 | `tests/test_strategy.py` | Reserve protection, policy limits, partner rotation, and a simulated nine-planet exchange. |
+| `tests/test_speed_aware_trading.py` | Speed changes, latency adaptation, urgent priority, settled-snapshot reuse, and background rendering. |
 | `scripts/check_validation.py` | Manual assertions against a fresh real validator exercise. |
 | `scripts/generate_run_summary.py` | Thin CLI wrapper around `planet_charlu.run_summary.write_summary` for regenerating an HTML summary by hand; standalone (adds `src/` to `sys.path` itself, no env setup needed). |
 | `scripts/demo_local_run.py` | Drives `run_trading()` against a scripted local WebSocket server (no live match or validator binary needed) to smoke-test the dashboard and `--run-log` export. |

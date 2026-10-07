@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import time
+from collections import deque
 from dataclasses import dataclass
 
 from planet_charlu import codec
 from planet_charlu.commands import generate_request_id
-from planet_charlu.domain.offers import Offer
+from planet_charlu.domain.offers import Offer, OfferStatus
 from planet_charlu.domain.resources import Bundle, Resource
 from planet_charlu.domain.world import WorldView
 from planet_charlu.generated import bazaar_pb2 as pb
@@ -23,7 +26,7 @@ from planet_charlu.logging_utils import (
     humanize_result_code,
 )
 from planet_charlu.session import ClientSession
-from planet_charlu.structured_log import RunLog
+from planet_charlu.structured_log import RunLog, LiveSummaryRenderer
 
 logger = logging.getLogger(__name__)
 RESOURCES = tuple(Resource)
@@ -52,7 +55,7 @@ class Decision:
         return getattr(self.message, self.message.WhichOneof("message")).request_id
 
 
-class SelfSufficientStrategy:
+class BaseStrategy:
     """Trade only for the two resources we do not produce; never give away
     either of them; pay only in our specialty, which production replaces.
 
@@ -87,6 +90,29 @@ class SelfSufficientStrategy:
     RESERVE_TICKS = 3
     TARGET_TICKS = 6
     SEEK_SPECIALTY_TO_TARGET = False
+    BATCH_TICKS = 3
+
+    def latency_ticks(self, world: WorldView) -> int:
+        """Budget at least one second, or the slowest of 32 recent delays.
+
+        Two delays cover ordering/settlement of both imported resources;
+        the replenishment target adds a third delay as headroom.
+        """
+        tick_ms = world.rules.tick_duration_ms or 1000
+        return max(1, math.ceil(max((1.0, *self.latencies)) * 1000 / max(1, tick_ms)))
+
+    def reserve_ticks(self, world: WorldView) -> int:
+        return max(self.RESERVE_TICKS, 3 + 2 * (self.latency_ticks(world) - 1))
+
+    def target_ticks(self, world: WorldView) -> int:
+        return max(self.TARGET_TICKS, 3 + 3 * self.latency_ticks(world))
+
+    def urgency_ticks(self, world: WorldView) -> int:
+        return max(3, 2 * self.latency_ticks(world) + 1)
+
+    def observe_latency(self, seconds: float) -> None:
+        if math.isfinite(seconds) and seconds >= 0:
+            self.latencies.append(seconds)
 
     def can_gift(self, world: WorldView, available: Bundle, ttl: int) -> bool:
         return True
@@ -101,6 +127,8 @@ class SelfSufficientStrategy:
         self.last_ad_tick = -100
         self.known_suppliers: dict[str, set[Resource]] = {}
         self.seen_transactions: set[str] = set()
+        self.latencies: deque[float] = deque(maxlen=32)
+        self.pending_trade_times: dict[str, float] = {}
         # Every incoming offer this call's loop actually looked at, with why
         # it was accepted or passed on -- repopulated fresh on every
         # choose() call so a caller can log it regardless of whether this
@@ -117,6 +145,9 @@ class SelfSufficientStrategy:
             if tx.transaction_id in self.seen_transactions:
                 continue
             self.seen_transactions.add(tx.transaction_id)
+            started = self.pending_trade_times.pop(tx.offer_id, None)
+            if started is not None:
+                self.observe_latency(time.monotonic() - started)
             if tx.proposer_id == world.self_station_id:
                 other, delivered_to_us = tx.recipient_id, tx.receive
             elif tx.recipient_id == world.self_station_id:
@@ -126,6 +157,10 @@ class SelfSufficientStrategy:
             delivered = frozenset(r for r in RESOURCES if quantity(delivered_to_us, r) > 0)
             if delivered:
                 self.known_suppliers.setdefault(other, set()).update(delivered)
+        for offer in world.offers:
+            if offer.is_expired_by(world.tick) or offer.status in (
+                    OfferStatus.WITHDRAWN, OfferStatus.EXPIRED, OfferStatus.RUN_ENDED):
+                self.pending_trade_times.pop(offer.offer_id, None)
 
     def confirmed_suppliers_of(self, resource: Resource) -> frozenset[str]:
         return frozenset(station_id for station_id, resources in self.known_suppliers.items()
@@ -147,9 +182,12 @@ class SelfSufficientStrategy:
         remaining = max(0, rules.duration_ticks - world.tick)
         if not remaining:
             return None
-        reserve = scaled(world.self.upkeep_per_tick, min(self.RESERVE_TICKS, remaining))
+        reserve_ticks = self.reserve_ticks(world)
+        reserve = scaled(world.self.upkeep_per_tick, min(reserve_ticks, remaining))
         emergency_reserve = scaled(world.self.upkeep_per_tick, min(3, remaining))
-        target = scaled(world.self.upkeep_per_tick, min(self.TARGET_TICKS, remaining))
+        target = scaled(world.self.upkeep_per_tick, min(self.target_ticks(world), remaining))
+        urgent_reserve = scaled(world.self.upkeep_per_tick,
+                               min(self.urgency_ticks(world), remaining))
         outgoing = [o for o in world.open_offers_from_me() if not o.is_expired_by(world.tick)]
         committed = Bundle.zero()
         for offer in outgoing:
@@ -157,7 +195,7 @@ class SelfSufficientStrategy:
         available = world.self.inventory.saturating_subtract(committed)
         surplus = available.saturating_subtract(reserve)
         needs = target.saturating_subtract(available)
-        critical = frozenset(r for r in RESOURCES if quantity(available, r) < quantity(emergency_reserve, r))
+        critical = frozenset(r for r in RESOURCES if quantity(available, r) < quantity(urgent_reserve, r))
         specialty = world.self.specialty
         not_produced = frozenset(RESOURCES) - {specialty}
         common = dict(run_id=world.run_id, request_id=generate_request_id())
@@ -252,37 +290,38 @@ class SelfSufficientStrategy:
         ad = own_ads[0] if own_ads else None
         refresh = ad is None or ad.expires_tick <= world.tick + 1
         changed = ad is not None and (ad.selling != selling or ad.seeking != seeking)
+        advertisement = None
         if routine_ok and (selling or seeking) and (refresh or (changed and world.tick >= self.last_ad_tick + 3)):
             ttl = min(10, rules.max_publication_ttl_ticks, remaining)
             if ttl > 0:
-                result = decision('advertise', 'publish specialty surplus and unproduced-resource needs', codec.build_advertise(
+                advertisement = decision('advertise', 'publish specialty surplus and unproduced-resource needs', codec.build_advertise(
                     **common, selling=sorted(selling, key=lambda r: r.value),
                     seeking=sorted(seeking, key=lambda r: r.value), expires_tick=world.tick + ttl))
-                if result:
-                    return result
 
         if len(outgoing) >= rules.max_open_outgoing_offers:
-            return None
+            return advertisement
         # Give a partner a real window to notice and act on the offer before
         # it expires -- too short a TTL just forces repeated re-offering
         # (and repeated budget spend) without giving them more of a chance
         # to accept.
-        ttl = min(5, rules.max_offer_ttl_ticks, remaining)
+        ttl = min(max(5, 2 * self.latency_ticks(world) + 1), rules.max_offer_ttl_ticks, remaining)
         if ttl <= 0:
-            return None
+            return advertisement
         # Retain upkeep across the offer's lifetime, in addition to the reserve.
-        spendable = available.saturating_subtract(scaled(world.self.upkeep_per_tick, min(self.RESERVE_TICKS + ttl, remaining)))
+        spendable = available.saturating_subtract(scaled(world.self.upkeep_per_tick, min(reserve_ticks + ttl, remaining)))
         busy = {o.recipient_id for o in outgoing}
         ads = [a for a in world.advertisements if a.station_id != world.self_station_id
                and a.station_id not in busy and a.is_active() and not a.is_expired_by(world.tick)
                and (not world.directory or a.station_id in world.directory)]
         ads.sort(key=lambda a: (self.partner_turn.get(a.station_id, -1), a.station_id))
-        # Prioritize critical resources (below the 3-tick reserve) ahead of
+        # Prioritize resources that may run out within two trade delays ahead of
         # everything else, then the shortest supply.
         wanted = sorted(seeking, key=lambda r: (r not in critical,
                          quantity(available, r) / max(1, quantity(world.self.upkeep_per_tick, r))))
         for need in wanted:
             urgent = need in critical
+            if advertisement is not None and not urgent:
+                continue
             if not urgent and not routine_ok:
                 # Recovering a critical resource is never rationed; seeking
                 # one that's merely below the routine target is, once
@@ -299,7 +338,9 @@ class SelfSufficientStrategy:
             else:
                 payment_options = (specialty,)
             pay_pool = available.saturating_subtract(emergency_reserve) if need in critical else spendable
-            cap = 6 if need in critical else 3
+            cap = max(6 if urgent else 3,
+                      quantity(world.self.upkeep_per_tick, need)
+                      * max(3 * self.latency_ticks(world), 3 if urgent else self.BATCH_TICKS))
             for candidate_ad in pool:
                 for payment in payment_options:
                     if payment not in candidate_ad.seeking:
@@ -316,6 +357,8 @@ class SelfSufficientStrategy:
                             expires_tick=world.tick + ttl))
                     if result:
                         return result
+        if advertisement is not None:
+            return advertisement
         # Help advertised specialty shortages with small gifts, rotating
         # partners -- pure generosity, so it's the first thing rationed.
         if routine_ok and self.can_gift(world, available, ttl):
@@ -340,27 +383,34 @@ class SelfSufficientStrategy:
             self.last_ad_tick = self.tick
 
 
-class ConservativeTradingStrategy(SelfSufficientStrategy):
-    """Prioritize 15 ticks of supply, with a three-tick emergency floor.
+class RestrainedTradingStrategy(BaseStrategy):
+    """Prioritize at least 15 ticks, with a three-tick emergency spending floor.
 
     Peer inventories/upkeep are absent from the wire protocol. By agreement,
     seeking advertisements stand in for a <=3-tick emergency signal. Gifts
-    require all our resources to cover 15 ticks plus the offer lifetime.
+    require all resources to cover the adaptive reserve plus the offer lifetime.
     """
 
     RESERVE_TICKS = 15
     TARGET_TICKS = 15
     SEEK_SPECIALTY_TO_TARGET = True
+    BATCH_TICKS = 8
 
     def can_gift(self, world: WorldView, available: Bundle, ttl: int) -> bool:
         remaining = max(0, world.rules.duration_ticks - world.tick)
         return available.covers(scaled(world.self.upkeep_per_tick,
-                                      min(self.RESERVE_TICKS + ttl, remaining)))
+                                      min(self.reserve_ticks(world) + ttl, remaining)))
 
 
 async def run_trading(session: ClientSession, run_log: RunLog | None = None, *,
                       conservative: bool = False) -> WorldView:
-    strategy = ConservativeTradingStrategy() if conservative else SelfSufficientStrategy()
+    async with LiveSummaryRenderer(run_log) as renderer:
+        return await _run_trading(session, run_log, conservative=conservative, renderer=renderer)
+
+
+async def _run_trading(session: ClientSession, run_log: RunLog | None, *,
+                       conservative: bool, renderer: LiveSummaryRenderer) -> WorldView:
+    strategy = RestrainedTradingStrategy() if conservative else BaseStrategy()
     strategy.sent_total = len(session.world.request_results)
     logger.info('trading started: policy=%s station=%s specialty=%s',
                 type(strategy).__name__, session.world.self_station_id, session.world.self.specialty.value)
@@ -371,15 +421,18 @@ async def run_trading(session: ClientSession, run_log: RunLog | None = None, *,
         world = session.world
         if world.tick != logged_tick:
             logged_tick = world.tick
-            logger.info("%s", format_status_report(world))
+            remaining = max(0, world.rules.duration_ticks - world.tick)
+            logger.info("%s", format_status_report(
+                world, reserve_ticks=min(strategy.reserve_ticks(world), remaining),
+                critical_ticks=min(strategy.urgency_ticks(world), remaining)))
             if run_log:
                 run_log.tick_snapshot(world, sent_total=strategy.sent_total)
                 run_log.transactions_settled(world)
                 run_log.offers_snapshot(world)
-                run_log.refresh_html()
+                renderer.request_refresh()
         if world.phase in (pb.PHASE_FINISHED, pb.PHASE_ABORTED) or world.self.health == 0 or world.self.failed_once:
             if run_log:
-                run_log.run_ended(world, reason='phase finished or station failed')
+                run_log.run_ended(world, reason='phase finished or station failed', refresh=False)
             return world
         action = strategy.choose(world)
         review_line = format_offer_review(world, strategy.last_offer_review)
@@ -400,6 +453,7 @@ async def run_trading(session: ClientSession, run_log: RunLog | None = None, *,
             run_log.decision(world, key=action.key, reason=action.reason,
                               request_id=action.request_id, message=action.message)
         try:
+            started = time.monotonic()
             outcome = await asyncio.wait_for(session.send(request_id=action.request_id, message=action.message), timeout=15)
             if outcome.ok:
                 logger.info('  -> ok%s', format_result_extra(outcome))
@@ -410,10 +464,24 @@ async def run_trading(session: ClientSession, run_log: RunLog | None = None, *,
                 run_log.command_result(world, key=action.key, outcome=outcome)
             if outcome.code == pb.RESULT_CODE_RATE_LIMITED:
                 strategy.retry_tick = max(world.tick + 1, outcome.retry_after_tick or 0)
-            # Reconcile server inventory/commitments before every next decision.
-            # Never blindly resend a command whose settlement is uncertain.
-            await session.sync(timeout=15)
+            if outcome.ok and outcome.object_id and action.message.WhichOneof('message') == 'offer':
+                if not Bundle.from_wire(action.message.offer.body.receive).is_zero():
+                    strategy.pending_trade_times[outcome.object_id] = started
+            # A push must include this result's processed version, not merely
+            # have a newer sequence, before it can replace an explicit sync.
+            await session.reconcile(outcome, timeout=15)
+            elapsed = time.monotonic() - started
+            strategy.observe_latency(elapsed)
+            logger.debug('command and reconciliation took %.3fs (tick duration %dms)',
+                         elapsed, session.world.rules.tick_duration_ms)
+            if run_log:
+                run_log.write('trade_timing', session.world.tick, {
+                    'request_id': action.request_id, 'elapsed_seconds': elapsed,
+                    'tick_duration_ms': session.world.rules.tick_duration_ms,
+                    'reserve_ticks': strategy.reserve_ticks(session.world),
+                    'target_ticks': strategy.target_ticks(session.world),
+                })
         except asyncio.TimeoutError as exc:
             if run_log:
-                run_log.run_ended(session.world, reason='command or sync timeout')
+                run_log.run_ended(session.world, reason='command or sync timeout', refresh=False)
             raise RuntimeError('server did not acknowledge a command or synchronize within 15 seconds; stopped to avoid trading on stale inventory') from exc

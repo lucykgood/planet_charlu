@@ -82,13 +82,14 @@ def _fmt_bundle(bundle: Bundle) -> str:
     return " + ".join(parts) if parts else "nothing"
 
 
-def _fmt_reserves(world: WorldView) -> str:
+def _fmt_reserves(world: WorldView, reserve_ticks: int, critical_ticks: int) -> str:
     parts = []
     for resource in Resource:
         current = getattr(world.self.inventory, resource.value)
         upkeep = getattr(world.self.upkeep_per_tick, resource.value)
-        reserve_target = upkeep * RESERVE_TICKS
-        status = "CRITICAL" if current < reserve_target else "ok"
+        reserve_target = upkeep * reserve_ticks
+        status = "CRITICAL" if current < upkeep * critical_ticks else (
+            "low" if current < reserve_target else "ok")
         parts.append(f"{resource.value}={current} (reserve {reserve_target}, {status})")
     return " | ".join(parts)
 
@@ -149,7 +150,9 @@ def format_offer_review(world: WorldView, review: list[tuple[Offer, str]]) -> st
     return "\n".join(lines)
 
 
-def format_status_report(world: WorldView, *, recent_trade_limit: int = 5) -> str:
+def format_status_report(world: WorldView, *, recent_trade_limit: int = 5,
+                         reserve_ticks: int = RESERVE_TICKS,
+                         critical_ticks: int = RESERVE_TICKS) -> str:
     """A multi-line, human-readable snapshot of our station right now.
 
     Meant to be logged once per tick so a run's console/log output stays
@@ -166,7 +169,7 @@ def format_status_report(world: WorldView, *, recent_trade_limit: int = 5) -> st
         TICK_SEPARATOR,
         f"tick {world.tick} | {humanize_phase(world.phase)} | "
         f"station={self_id} specialty={world.self.specialty.value} health={world.self.health}",
-        f"reserves: {_fmt_reserves(world)}",
+        f"reserves: {_fmt_reserves(world, reserve_ticks, critical_ticks)}",
     ]
 
     outgoing = [o for o in world.open_offers_from_me() if not o.is_expired_by(world.tick)]

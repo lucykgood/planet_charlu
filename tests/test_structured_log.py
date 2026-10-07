@@ -13,7 +13,7 @@ from planet_charlu.domain.offers import Offer
 from planet_charlu.domain.outcomes import CommandOutcome
 from planet_charlu.domain.world import WorldView
 from planet_charlu.generated import bazaar_pb2 as pb
-from planet_charlu.strategy import SelfSufficientStrategy
+from planet_charlu.strategy import BaseStrategy
 from planet_charlu.structured_log import RunLog
 
 
@@ -66,8 +66,8 @@ def test_tick_snapshot_records_inventory_and_budget(tmp_path):
 
 def test_decision_uses_key_prefix_as_kind_for_non_partner_actions(tmp_path):
     path = tmp_path / "run.jsonl"
-    w = world(ads=[make_advertisement(station_id="TEAM-Z")])
-    strategy = SelfSufficientStrategy()
+    w = world()
+    strategy = BaseStrategy()
     action = strategy.choose(w)
     assert action is not None
     assert action.key == "advertise"
@@ -90,8 +90,7 @@ def test_decision_splits_partner_key_into_seek_trade_or_gift(tmp_path):
     path = tmp_path / "run.jsonl"
 
     seek_world = world(ads=[make_advertisement(station_id="TEAM-Z")])
-    seek_strategy = SelfSufficientStrategy()
-    skip_ad(seek_strategy, seek_world)
+    seek_strategy = BaseStrategy()
     seek_action = seek_strategy.choose(seek_world)
     assert seek_action.key == "partner:TEAM-Z"
 
@@ -99,7 +98,7 @@ def test_decision_splits_partner_key_into_seek_trade_or_gift(tmp_path):
         inventory=(100, 30, 30),
         ads=[make_advertisement(station_id="TEAM-Z", selling=[], seeking=[pb.RESOURCE_WATER])],
     )
-    gift_strategy = SelfSufficientStrategy()
+    gift_strategy = BaseStrategy()
     skip_ad(gift_strategy, gift_world)
     gift_action = gift_strategy.choose(gift_world)
     assert gift_action.key == "partner:TEAM-Z"
@@ -118,8 +117,7 @@ def test_decision_splits_partner_key_into_seek_trade_or_gift(tmp_path):
 def test_decision_with_message_records_exact_offer_terms(tmp_path):
     path = tmp_path / "run.jsonl"
     w = world(ads=[make_advertisement(station_id="TEAM-Z")])
-    strategy = SelfSufficientStrategy()
-    skip_ad(strategy, w)
+    strategy = BaseStrategy()
     action = strategy.choose(w)
     assert action.key == "partner:TEAM-Z"
 
@@ -146,7 +144,7 @@ def test_decision_without_message_omits_sent_field(tmp_path):
 def test_command_result_records_outcome(tmp_path):
     path = tmp_path / "run.jsonl"
     w = world(ads=[make_advertisement(station_id="TEAM-Z")])
-    strategy = SelfSufficientStrategy()
+    strategy = BaseStrategy()
     action = strategy.choose(w)
     outcome = CommandOutcome.from_wire(
         make_result(request_id=action.request_id, ok=True, code=pb.RESULT_CODE_OK,

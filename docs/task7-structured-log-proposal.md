@@ -147,7 +147,7 @@ Design choices worth flagging for the group:
   a malformed trailing line is skipped with a warning instead of aborting the
   whole summary.
 - **`offer_passed` is a side channel on the strategy, not a return-type
-  change.** `SelfSufficientStrategy.choose()` returns at most one `Decision`,
+  change.** `BaseStrategy.choose()` returns at most one `Decision`,
   and a lot of code (tests included) depends on that. Recording *every*
   incoming offer it looked at -- not just the one it acted on -- without
   touching that signature meant adding `self.last_offer_review: list[(Offer,

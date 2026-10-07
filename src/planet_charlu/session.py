@@ -193,6 +193,29 @@ class ClientSession:
             lambda world: world.snapshot_sequence > previous_sequence, timeout=timeout
         )
 
+    async def reconcile(self, outcome: CommandOutcome, *, timeout: float = 15.0) -> WorldView:
+        """Reuse a pushed snapshot only when it proves the result is applied.
+
+        A newer sequence alone is insufficient: a tick push may precede the
+        command. Complete snapshots at the result's processed world version
+        (or containing its request record) include its inventory/commitments.
+        """
+        def includes_result(world: WorldView) -> bool:
+            return (outcome.processed_version > 0
+                    and world.world_version >= outcome.processed_version) or any(
+                        r.request_id == outcome.request_id for r in world.request_results)
+
+        if includes_result(self.world):
+            return self.world
+
+        async def reconcile_after_sync() -> WorldView:
+            world = await self.sync(timeout=timeout)
+            if not includes_result(world):
+                world = await self.wait_for(includes_result, timeout=None)
+            return world
+
+        return await asyncio.wait_for(reconcile_after_sync(), timeout=timeout)
+
 
 async def open_session(connection: BazaarConnection) -> ClientSession:
     """Complete the readiness handshake and start a ``ClientSession``'s pump loop."""

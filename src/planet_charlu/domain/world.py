@@ -27,6 +27,7 @@ class TradingRules:
     max_request_records_per_station: int = 100
     max_open_outgoing_offers: int = 8
     max_command_bytes: int = 16384
+    tick_duration_ms: int = 1000
 
     @classmethod
     def from_wire(cls, rules: bazaar_pb2.PublicRules) -> "TradingRules":

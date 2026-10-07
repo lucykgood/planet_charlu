@@ -119,7 +119,7 @@ def _build_parser(env: Mapping[str, str]) -> argparse.ArgumentParser:
              "INFO level shows the per-tick dashboard and per-decision lines only",
     )
     parser.add_argument(
-        "--conservative-trading", action=argparse.BooleanOptionalAction,
+        "--restrained-trading", dest="conservative_trading", action=argparse.BooleanOptionalAction,
         default=env.get("BAZAAR_CONSERVATIVE_TRADING", "false").lower() in ("true", "1", "yes"),
         help="Target 15 ticks of supply and gift only for advertised resource emergencies "
              "(env: BAZAAR_CONSERVATIVE_TRADING)",

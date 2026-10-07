@@ -126,9 +126,9 @@ def test_config_repr_and_str_redact_token():
     assert "redacted" in repr(config)
 
 
-def test_conservative_trading_flag_and_environment():
+def test_restrained_trading_flag_and_environment():
     assert not load_config(["--token", "t"], {}).conservative_trading
-    assert load_config(["--token", "t", "--conservative-trading"], {}).conservative_trading
+    assert load_config(["--token", "t", "--restrained-trading"], {}).conservative_trading
     env = {"BAZAAR_TOKEN": "t", "BAZAAR_CONSERVATIVE_TRADING": "true"}
     assert load_config([], env).conservative_trading
-    assert not load_config(["--no-conservative-trading"], env).conservative_trading
+    assert not load_config(["--no-restrained-trading"], env).conservative_trading

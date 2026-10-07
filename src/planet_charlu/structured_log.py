@@ -27,6 +27,7 @@ them immediately.
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 import time
 import webbrowser
@@ -132,6 +133,7 @@ class RunLog(EventLog):
                 "self_station_id": world.self_station_id,
                 "specialty": world.self.specialty.value,
                 "duration_ticks": world.rules.duration_ticks,
+                "tick_duration_ms": getattr(world.rules, 'tick_duration_ms', 1000),
                 "max_request_records_per_station": world.rules.max_request_records_per_station,
                 "starting_inventory": _bundle_dict(world.self.inventory),
                 "upkeep_per_tick": _bundle_dict(world.self.upkeep_per_tick),
@@ -144,6 +146,7 @@ class RunLog(EventLog):
             world.tick,
             {
                 "phase": world.phase,
+                "tick_duration_ms": world.rules.tick_duration_ms,
                 "health": world.self.health,
                 "inventory": _bundle_dict(world.self.inventory),
                 "last_production": _bundle_dict(world.self.last_production),
@@ -264,7 +267,7 @@ class RunLog(EventLog):
 
         Snapshots are complete, not incremental, so the same settled transaction
         reappears in every later snapshot; this call is idempotent per
-        transaction id, mirroring ``SelfSufficientStrategy._learn_suppliers``.
+        transaction id, mirroring ``BaseStrategy._learn_suppliers``.
         """
         for tx in world.transactions:
             if tx.transaction_id in self._seen_transactions or not tx.involves(world.self_station_id):
@@ -286,7 +289,7 @@ class RunLog(EventLog):
             },
         )
 
-    def run_ended(self, world: WorldView, *, reason: str) -> None:
+    def run_ended(self, world: WorldView, *, reason: str, refresh: bool = True) -> None:
         self._write(
             "run_ended",
             world.tick,
@@ -303,4 +306,47 @@ class RunLog(EventLog):
         # write after which the HTML must stop showing "Live" and auto-
         # reloading, and a caller (a script, a test) forgetting to also call
         # refresh_html() separately must not leave the page stuck live forever.
-        self.refresh_html()
+        if refresh:
+            self.refresh_html()
+
+
+class LiveSummaryRenderer:
+    """One background render at a time; tick refresh requests are coalesced.
+
+    The worker finishes before a final render and before the log is closed,
+    so an older live report cannot overwrite the completed report.
+    """
+
+    def __init__(self, run_log: RunLog | None, *, interval: float = 1.0) -> None:
+        self.run_log = run_log
+        self.interval = interval
+        self.dirty = asyncio.Event()
+        self.stopping = asyncio.Event()
+        self.worker: asyncio.Task | None = None
+
+    async def __aenter__(self):
+        if self.run_log is not None:
+            self.worker = asyncio.create_task(self._render())
+        return self
+
+    def request_refresh(self) -> None:
+        self.dirty.set()
+
+    async def _render(self) -> None:
+        while not self.stopping.is_set():
+            await self.dirty.wait()
+            if self.stopping.is_set():
+                break
+            self.dirty.clear()
+            await asyncio.to_thread(self.run_log.refresh_html)
+            try:
+                await asyncio.wait_for(self.stopping.wait(), timeout=self.interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def __aexit__(self, *exc_info) -> None:
+        if self.worker is not None:
+            self.stopping.set()
+            self.dirty.set()
+            await self.worker
+            await asyncio.to_thread(self.run_log.refresh_html)

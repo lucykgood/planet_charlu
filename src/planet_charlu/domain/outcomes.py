@@ -19,6 +19,8 @@ class CommandOutcome:
     object_id: Optional[str]
     transaction_id: Optional[str]
     retry_after_tick: Optional[int]
+    processed_version: int = 0
+    processed_tick: int = 0
 
     @classmethod
     def from_wire(cls, wire: bazaar_pb2.Result) -> "CommandOutcome":
@@ -26,6 +28,8 @@ class CommandOutcome:
             request_id=wire.request_id,
             ok=wire.ok,
             code=wire.code,
+            processed_version=wire.processed_version,
+            processed_tick=wire.processed_tick,
             object_id=None if wire.object_id.null else wire.object_id.value,
             transaction_id=None if wire.transaction_id.null else wire.transaction_id.value,
             retry_after_tick=(

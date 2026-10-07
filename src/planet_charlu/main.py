@@ -48,9 +48,9 @@ async def _run_client(config: ClientConfig) -> None:
         if config.run_log_path:
             try:
                 if run_log is not None:
-                    summary_path = run_log.refresh_html()
+                    summary_path = await asyncio.to_thread(run_log.refresh_html)
                 else:
-                    summary_path = write_summary(config.run_log_path)
+                    summary_path = await asyncio.to_thread(write_summary, config.run_log_path)
                 if summary_path is not None:
                     logger.info("HTML run summary written to %s", summary_path)
             except Exception:

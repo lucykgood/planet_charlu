@@ -14,6 +14,8 @@ def test_from_wire_maps_success_fields_and_leaves_nulls_as_none():
     assert outcome.object_id is None
     assert outcome.transaction_id is None
     assert outcome.retry_after_tick is None
+    assert outcome.processed_version == wire.processed_version
+    assert outcome.processed_tick == wire.processed_tick
 
 
 def test_from_wire_reads_present_optional_values():

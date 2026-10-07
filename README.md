@@ -171,9 +171,11 @@ JSON log.
 Every run also writes a structured JSON Lines record (for machine reading, not
 for you to read directly) to an auto-named file under `runs/`, and renders it
 into an interactive HTML dashboard next to it -- **live**: open it while the
-run is still going and it keeps itself current, reloading every few seconds
-for as long as the run is in progress, then settles once the run ends
-(cleanly or not). It has two tabs: **Overview** (inventory/health over time,
+run is still going and it keeps itself current, reloading every few seconds.
+A background renderer coalesces tick updates and renders at most once per
+second while trading. Slow rendering does not block the trading loop. Once the
+run ends (cleanly or not), the worker finishes before the final report is
+rendered. It has two tabs: **Overview** (inventory/health over time,
 decisions and command outcomes, settled trades) and **Timeline**, a single
 chronological, filterable feed merging completed trades, rejected requests
 (our commands the server turned down, and incoming offers we declined),
@@ -217,22 +219,45 @@ the credentials file's `players` list.
 | Structured run log | `--run-log` | `BAZAAR_RUN_LOG` | auto-named file under `runs/` |
 | Open HTML summary in a browser on first write | `--no-open-browser` (to disable) | None | on |
 | Verbose (raw protocol log lines) | `--verbose` / `-v` | None | off |
-| Conservative trading | `--conservative-trading` / `--no-conservative-trading` | `BAZAAR_CONSERVATIVE_TRADING` (`true`, `1`, or `yes` enables) | Off |
+| Restrained trading | `--restrained-trading` / `--no-restrained-trading` | `BAZAAR_CONSERVATIVE_TRADING` (`true`, `1`, or `yes` enables) | Off |
 
-Enable the conservative policy with `--conservative-trading` or set
+Enable the restrained policy with `--restrained-trading` or set
 `BAZAAR_CONSERVATIVE_TRADING=true` in `.env` for Docker Compose. The default
 policy remains available when this flag is off. The conservative policy targets
-15 ticks of upkeep for every resource, subtracts open offer commitments, and
-protects 15 ticks plus the offer lifetime before routine outgoing spending.
+at least 15 ticks of upkeep for every resource, subtracts open offer commitments,
+and protects its adaptive reserve plus the offer lifetime before routine
+outgoing spending.
 Emergency trades may use stock down to a three-tick floor to rescue a resource
 below that floor. All targets are capped at the run's remaining duration.
 
 Gifts are at most two specialty units and require every resource to cover the
-15-tick reserve plus the offer lifetime. Trades to replenish our resources take
+adaptive reserve plus the offer lifetime. Trades to replenish our resources take
 priority. A peer seeking our specialty is treated as a signal that it has three
 ticks or less of that resource; this is an agreed proxy, since the protocol
 does not expose peer inventories or upkeep. The client cannot verify that peer
 threshold from advertisements.
+
+Both trading policies adapt to simulation speed using the server's
+`tick_duration_ms` and the largest of their 32 recent command/reconciliation
+and observed outgoing-trade settlement delays, with a one-second starting
+allowance. If that allowance spans `L` ticks, the reserve is at least
+`3 + 2 × (L - 1)` ticks and the replenishment target is at least `3 + 3 × L`
+ticks, while preserving each policy's existing minimum. Rescue priority starts
+below `2 × L + 1` ticks; rescue spending still protects three ticks of upkeep.
+All resource buffers are capped by the run's remaining ticks.
+
+Purchase batches scale with upkeep and delay; conservative routine trades can
+buy up to eight ticks of the needed resource, or more as latency rises, always
+bounded by the shortage and safe payment stock. Urgent purchases precede ad
+refreshes. Offers request at least five ticks or `2 × L + 1`, whichever is
+larger, subject to server expiry limits. These limits and peer responsiveness
+still constrain how quickly a trade can settle.
+
+After a command, the client reuses a pushed snapshot only if its world version
+includes the result's processed version or it contains that request record.
+Otherwise it synchronizes and waits for proof the command was applied. The
+JSON log includes `trade_timing` events with command/reconciliation duration,
+tick duration, and adaptive reserve/target values.
 
 Python does not automatically load `.env`; Docker Compose loads it for the app
 container. Keep tokens and validator output local;
